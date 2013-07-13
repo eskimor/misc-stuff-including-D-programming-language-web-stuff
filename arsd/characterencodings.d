@@ -1,3 +1,5 @@
+// helper program is in ~me/encodings.d to make more tables from wikipedia
+
 /**
 	This is meant to help get data from the wild into utf8 strings
 	so you can work with them easily inside D.
@@ -41,6 +43,22 @@ import std.string;
 import std.array;
 import std.conv;
 
+/// Like convertToUtf8, but if the encoding is unknown, it just strips all chars > 127 and calls it done instead of throwing
+string convertToUtf8Lossy(immutable(ubyte)[] data, string dataCharacterEncoding) {
+	try {
+		auto ret = convertToUtf8(data, dataCharacterEncoding);
+		import std.utf;
+		validate(ret);
+		return ret;
+	} catch(Exception e) {
+		string ret;
+		foreach(b; data)
+			if(b < 128)
+				ret ~= b;
+		return ret;
+	}
+}
+
 /// Takes data from a given character encoding and returns it as UTF-8
 string convertToUtf8(immutable(ubyte)[] data, string dataCharacterEncoding) {
 	// just to normalize the passed string...
@@ -62,11 +80,17 @@ string convertToUtf8(immutable(ubyte)[] data, string dataCharacterEncoding) {
 		case "utf32le":
 			return to!string(cast(dstring) data);
 		// FIXME: does the big endian to little endian conversion work?
+		case "ascii":
+		case "usascii": // utf-8 is a superset of ascii
 		case "utf8":
 			return cast(string) data;
 		// and now the various 8 bit encodings we support.
 		case "windows1252":
 			return decodeImpl(data, ISO_8859_1, Windows_1252);
+		case "windows1251":
+			return decodeImpl(data, Windows_1251, Windows_1251_Lower);
+		case "koi8r":
+			return decodeImpl(data, KOI8_R, KOI8_R_Lower);
 		case "latin1":
 		case "iso88591":
 			// Why am I putting Windows_1252 here? A lot of
@@ -307,7 +331,7 @@ immutable dchar[] ISO_8859_8 = [
 	'ט', 'י', 'ך', 'כ', 'ל', 'ם', 'מ', 'ן',
 	'נ', 'ס', 'ע', 'ף', 'פ', 'ץ', 'צ', 'ק',
 	//                        v    v    those are wrong
-	'ר', 'ש', 'ת', ' ', ' ', ' ', ' ', ' ']; // FIXME:  those ones marked wrong are supposed to be left to right and right to left markers, not spaces.
+	'ר', 'ש', 'ת', ' ', ' ', ' ', ' ', ' ']; // FIXME:  those ones marked wrong are supposed to be left to right and right to left markers, not spaces. lol maybe it isn't wrong
 
 immutable dchar[] ISO_8859_9 = [ 
 	' ', '¡', '¢', '£', '¤', '¥', '¦', '§',
@@ -406,4 +430,44 @@ immutable dchar[] ISO_8859_16 = [
 	'è', 'é', 'ê', 'ë', 'ì', 'í', 'î', 'ï',
 	'đ', 'ń', 'ò', 'ó', 'ô', 'ő', 'ö', 'ś',
 	'ű', 'ù', 'ú', 'û', 'ü', 'ę', 'ț', 'ÿ'];
+
+immutable dchar[] KOI8_R_Lower = [
+	'─', '│', '┌', '┐', '└', '┘', '├', '┤',
+	'┬', '┴', '┼', '▀', '▄', '█', '▌', '▐',
+	'░', '▒', '▓', '⌠', '■', '∙', '√', '≈',
+	'≤', '≥', '\u00a0', '⌡', '°', '²', '·', '÷'];
+
+immutable dchar[] KOI8_R = [
+	'═', '║', '╒', 'ё', '╓', '╔', '╕', '╖',
+	'╗', '╘', '╙', '╚', '╛', '╜', '╝', '╞',
+	'╟', '╠', '╡', 'ё', '╢', '╣', '╤', '╥',
+	'╦', '╧', '╨', '╩', '╪', '╫', '╬', '©',
+	'ю', 'а', 'б', 'ц', 'д', 'е', 'ф', 'г',
+	'х', 'и', 'й', 'к', 'л', 'м', 'н', 'о',
+	'п', 'я', 'р', 'с', 'т', 'у', 'ж', 'в',
+	'ь', 'ы', 'з', 'ш', 'э', 'щ', 'ч', 'ъ',
+	'ю', 'а', 'б', 'ц', 'д', 'е', 'ф', 'г',
+	'х', 'и', 'й', 'к', 'л', 'м', 'н', 'о',
+	'п', 'я', 'р', 'с', 'т', 'у', 'ж', 'в',
+	'ь', 'ы', 'з', 'ш', 'э', 'щ', 'ч', 'ъ'];
+
+immutable dchar[] Windows_1251_Lower = [
+	'Ђ', 'Ѓ', '‚', 'ѓ', '„', '…', '†', '‡',
+	'€', '‰', 'Љ', '‹', 'Њ', 'Ќ', 'Ћ', 'Џ',
+	'ђ', '‘', '’', '“', '”', '•', '–', '—',
+	' ', '™', 'љ', '›', 'њ', 'ќ', 'ћ', 'џ'];
+
+immutable dchar[] Windows_1251 = [
+	' ', 'Ў', 'ў', 'Ј', '¤', 'Ґ', '¦', '§',
+	'Ё', '©', 'Є', '«', '¬', '­', '®', 'Ї',
+	'°', '±', 'І', 'і', 'ґ', 'µ', '¶', '·',
+	'ё', '№', 'є', '»', 'ј', 'Ѕ', 'ѕ', 'ї',
+	'А', 'Б', 'В', 'Г', 'Д', 'Е', 'Ж', 'З',
+	'И', 'Й', 'К', 'Л', 'М', 'Н', 'О', 'П',
+	'Р', 'С', 'Т', 'У', 'Ф', 'Х', 'Ц', 'Ч',
+	'Ш', 'Щ', 'Ъ', 'Ы', 'Ь', 'Э', 'Ю', 'Я',
+	'а', 'б', 'в', 'г', 'д', 'е', 'ж', 'з',
+	'и', 'й', 'к', 'л', 'м', 'н', 'о', 'п',
+	'р', 'с', 'т', 'у', 'ф', 'х', 'ц', 'ч',
+	'ш', 'щ', 'ъ', 'ы', 'ь', 'э', 'ю', 'я'];
 

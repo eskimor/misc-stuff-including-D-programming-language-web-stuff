@@ -2,6 +2,8 @@ module simpledisplay;
 /*
 	Stuff to add:
 
+	take a screenshot function!
+
 	Pens and brushes?
 	Maybe a global event loop?
 
@@ -9,20 +11,19 @@ module simpledisplay;
 	Key items
 */
 
-version(linux)
-	version = X11;
-version(OSX)
-	version = X11;
-version(FreeBSD)
-	version = X11;
-version(Solaris)
-	version = X11;
-
-import std.exception;
-import core.thread;
-import std.string; // FIXME: move to drawText X11 on next dmd
-
-import std.stdio;
+version(html5) {} else {
+	version(linux)
+		version = X11;
+	version(OSX) {
+		version(OSXCocoa) {}
+		else { version = X11; }
+	}
+		//version = OSXCocoa; // this was written by KennyTM
+	version(FreeBSD)
+		version = X11;
+	version(Solaris)
+		version = X11;
+}
 
 public import arsd.color; // no longer stand alone... :-( but i need a common type for this to work with images easily.
 
@@ -38,7 +39,8 @@ struct Size {
 
 
 struct KeyEvent {
-
+	uint keycode;
+	bool pressed;
 }
 
 struct MouseEvent {
@@ -106,7 +108,7 @@ struct Pen {
 }
 
 
-class Image {
+final class Image {
 	this(int width, int height) {
 		this.width = width;
 		this.height = height;
@@ -122,7 +124,7 @@ class Image {
 		impl.dispose();
 	}
 
-	void putPixel(int x, int y, Color c) {
+	final void putPixel(int x, int y, Color c) {
 		if(x < 0 || x >= width)
 			return;
 		if(y < 0 || y >= height)
@@ -131,8 +133,57 @@ class Image {
 		impl.setPixel(x, y, c);
 	}
 
-	void opIndexAssign(Color c, int x, int y) {
+	final void opIndexAssign(Color c, int x, int y) {
 		putPixel(x, y, c);
+	}
+
+	/// this is here for interop with arsd.image. where can be a TrueColorImage's data member
+	/// if you pass in a buffer, it will put it right there. length must be width*height*4 already
+	/// if you pass null, it will allocate a new one.
+	ubyte[] getRgbaBytes(ubyte[] where = null) {
+		if(where is null)
+			where = new ubyte[this.width*this.height*4];
+		convertToRgbaBytes(where);
+		return where;
+	}
+
+	/// this is here for interop with arsd.image. from can be a TrueColorImage's data member
+	void setRgbaBytes(in ubyte[] from ) {
+		assert(from.length == this.width * this.height * 4);
+		setFromRgbaBytes(from);
+	}
+
+	// FIXME: make properly cross platform by getting rgba right
+
+	/// warning: this is not portable across platforms because the data format can change
+	ubyte* getDataPointer() {
+		return impl.rawData;
+	}
+
+	/// for use with getDataPointer
+	final int bytesPerLine() const pure @safe nothrow {
+		version(Windows)
+			return ((cast(int) width * 3 + 3) / 4) * 4;
+		else version(X11)
+			return 4 * width;
+		else version(OSXCocoa)
+			return 4 * width;
+		else version(html5)
+			return 4 * width;
+		else static assert(0);
+	}
+
+	/// for use with getDataPointer
+	final int bytesPerPixel() const pure @safe nothrow {
+		version(Windows)
+			return 3;
+		else version(X11)
+			return 4;
+		else version(OSXCocoa)
+			return 4;
+		else version(html5)
+			return 4;
+		else static assert(0);
 	}
 
 	immutable int width;
@@ -149,7 +200,7 @@ void displayImage(Image image, SimpleWindow win = null) {
 			p.drawImage(Point(0, 0), image);
 		}
 		win.eventLoop(0,
-			(int) {
+			(int, bool pressed) {
 				win.close();
 			} );
 	} else {
@@ -210,6 +261,10 @@ struct ScreenPainter {
 		drawRectangle(Point(0, 0), window.width, window.height);
 	}
 
+	void drawPixmap(Sprite s, Point upperLeft) {
+		impl.drawPixmap(s, upperLeft.x, upperLeft.y);
+	}
+
 	void drawImage(Point upperLeft, Image i) {
 		impl.drawImage(upperLeft.x, upperLeft.y, i);
 	}
@@ -264,6 +319,113 @@ struct ScreenPainter {
 		mixin NativeScreenPainterImplementation!();
 	}
 
+// FIXME: i haven't actually tested the sprite class on MS Windows
+
+/**
+	Sprites are optimized for fast drawing on the screen, but slow for direct pixel
+	access. They are best for drawing a relatively unchanging image repeatedly on the screen.
+
+	You create one by giving a window and an image. It optimizes for that window,
+	and copies the image into it to use as the initial picture. Creating a sprite
+	can be quite slow (especially over a network connection) so you should do it
+	as little as possible and just hold on to your sprite handles after making them.
+
+	Then you can use sprite.drawAt(painter, point); to draw it, which should be
+	a fast operation - much faster than drawing the Image itself every time.
+
+	FIXME: you are supposed to be able to draw on these similarly to on windows.
+*/
+class Sprite {
+	// FIXME: we should actually be able to draw upon these, same as windows
+	//ScreenPainter drawUpon();
+
+	this(SimpleWindow win, Image i) {
+		this.width = i.width;
+		this.height = i.height;
+
+		version(X11) {
+			auto display = XDisplayConnection.get();
+			handle = XCreatePixmap(display, cast(Drawable) win.window, width, height, 24);
+			XPutImage(display, cast(Drawable) handle, DefaultGC(display, DefaultScreen(display)), i.handle, 0, 0, 0, 0, i.width, i.height);
+		} else version(Windows) {
+			BITMAPINFO infoheader;
+			infoheader.bmiHeader.biSize = infoheader.bmiHeader.sizeof;
+			infoheader.bmiHeader.biWidth = width;
+			infoheader.bmiHeader.biHeight = height;
+			infoheader.bmiHeader.biPlanes = 1;
+			infoheader.bmiHeader.biBitCount = 24;
+			infoheader.bmiHeader.biCompression = BI_RGB;
+
+			ubyte* rawData;
+
+			// FIXME: this should prolly be a device dependent bitmap...
+			handle = CreateDIBSection(
+				null,
+				&infoheader,
+				DIB_RGB_COLORS,
+				cast(void**) &rawData,
+				null,
+				0);
+
+			if(handle is null)
+				throw new Exception("couldn't create pixmap");
+
+			auto itemsPerLine = ((cast(int) width * 3 + 3) / 4) * 4;
+			auto arrLength = itemsPerLine * height;
+			rawData[0..arrLength] = i.rawData[0..arrLength];
+		} else version(OSXCocoa) {
+			// FIXME: I have no idea if this is even any good
+			ubyte* rawData;
+        
+			auto colorSpace = CGColorSpaceCreateDeviceRGB();
+			context = CGBitmapContextCreate(null, width, height, 8, 4*width,
+                                            colorSpace,
+                                            kCGImageAlphaPremultipliedLast
+                                                   |kCGBitmapByteOrder32Big);
+            		CGColorSpaceRelease(colorSpace);
+            		rawData = CGBitmapContextGetData(context);
+
+			auto rdl = (width * height * 4);
+			rawData[0 .. rdl] = i.rawData[0 .. rdl];
+		} else version(html5) {
+			handle = nextHandle;
+			nextHandle++;
+			Html5.createImage(handle, i);
+		} else static assert(0);
+	}
+
+	void dispose() {
+		version(X11)
+			XFreePixmap(XDisplayConnection.get(), handle);
+		else version(Windows)
+			DeleteObject(handle);
+		else version(OSXCocoa)
+			CGContextRelease(context);
+		else version(html5)
+			Html5.freeImage(handle);
+		else static assert(0);
+
+	}
+
+	int width;
+	int height;
+	version(X11)
+		Pixmap handle;
+	else version(Windows)
+		HBITMAP handle;
+	else version(OSXCocoa)
+		CGContextRef context;
+	else version(html5) {
+		static int nextHandle;
+		int handle;
+	}
+	else static assert(0);
+
+	void drawAt(ScreenPainter painter, Point where) {
+		painter.drawPixmap(this, where);
+	}
+}
+
 class SimpleWindow {
 	int width;
 	int height;
@@ -275,8 +437,8 @@ class SimpleWindow {
 	/// width and height is equal to the image. (A window's client area
 	/// is the drawable space inside; it excludes the title bar, etc.)
 	this(Image image, string title = null) {
-		this.backingImage = image;
 		this(image.width, image.height, title);
+		this.image = image;
 	}
 
 	this(Size size, string title = null) {
@@ -288,8 +450,6 @@ class SimpleWindow {
 		this.height = height;
 		impl.createWindow(width, height, title is null ? "D Application" : title);
 	}
-
-	Image backingImage;
 
 	~this() {
 		impl.dispose();
@@ -317,7 +477,7 @@ class SimpleWindow {
 				handlePulse = handler;
 			} else static if(__traits(compiles, handleMouseEvent = handler)) {
 				handleMouseEvent = handler;
-			} else static assert(0, "I can't use this event handler " ~ typeof(handler).stringof);
+			} else static assert(0, "I can't use this event handler " ~ typeof(handler).stringof ~ "\nNote: if you want to capture keycode events, this recently changed to (int code, bool pressed) instead of the old (int code)");
 		}
 
 
@@ -329,26 +489,45 @@ class SimpleWindow {
 	}
 
 	@property void image(Image i) {
-		backingImage = i;
 		version(Windows) {
+			BITMAP bm;
+			HDC hdc = GetDC(hwnd);
+			HDC hdcMem = CreateCompatibleDC(hdc);
+			HBITMAP hbmOld = SelectObject(hdcMem, i.handle);
+
+			GetObject(i.handle, bm.sizeof, &bm);
+
+			BitBlt(hdc, 0, 0, bm.bmWidth, bm.bmHeight, hdcMem, 0, 0, SRCCOPY);
+
+			SelectObject(hdcMem, hbmOld);
+			DeleteDC(hdcMem);
+			DeleteDC(hwnd);
+
+			/*
 			RECT r;
 			r.right = i.width;
 			r.bottom = i.height;
-
 			InvalidateRect(hwnd, &r, false);
-		}
+			*/
+		} else
 		version(X11) {
 			if(!destroyed)
-			XPutImage(display, cast(Drawable) window, gc, backingImage.handle, 0, 0, 0, 0, backingImage.width, backingImage.height);
-		}
+			XPutImage(display, cast(Drawable) window, gc, i.handle, 0, 0, 0, 0, i.width, i.height);
+		} else
+		version(OSXCocoa) {
+           		draw().drawImage(Point(0, 0), i);
+			setNeedsDisplay(view, true);
+		} else version(html5) {
+			// FIXME html5
+		} else static assert(0);
 	}
 
 	/// What follows are the event handlers. These are set automatically
 	/// by the eventLoop function, but are still public so you can change
-	/// them later.
+	/// them later. wasPressed == true means key down. false == key up.
 
 	/// Handles a low-level keyboard event
-	void delegate(int key) handleKeyEvent;
+	void delegate(int key, bool wasPressed) handleKeyEvent;
 
 	/// Handles a higher level keyboard event - c is the character just pressed.
 	void delegate(dchar c) handleCharEvent;
@@ -374,66 +553,14 @@ class SimpleWindow {
 /* Additional utilities */
 
 
-import std.conv;
-import std.math;
-
 Color fromHsl(real h, real s, real l) {
-	h = h % 360;
-
-	real C = (1 - abs(2 * l - 1)) * s;
-
-	real hPrime = h / 60;
-
-	real X = C * (1 - abs(hPrime % 2 - 1));
-
-	real r, g, b;
-
-	if(std.math.isNaN(h))
-		r = g = b = 0;
-	else if (hPrime >= 0 && hPrime < 1) {
-		r = C;
-		g = X;
-		b = 0;
-	} else if (hPrime >= 1 && hPrime < 2) {
-		r = X;
-		g = C;
-		b = 0;
-	} else if (hPrime >= 2 && hPrime < 3) {
-		r = 0;
-		g = C;
-		b = X;
-	} else if (hPrime >= 3 && hPrime < 4) {
-		r = 0;
-		g = X;
-		b = C;
-	} else if (hPrime >= 4 && hPrime < 5) {
-		r = X;
-		g = 0;
-		b = C;
-	} else if (hPrime >= 5 && hPrime < 6) {
-		r = C;
-		g = 0;
-		b = X;
-	}
-
-	real m = l - C / 2;
-
-	r += m;
-	g += m;
-	b += m;
-
-	return Color(
-		cast(ubyte)(r * 255),
-		cast(ubyte)(g * 255),
-		cast(ubyte)(b * 255),
-		255);
+	return arsd.color.fromHsl([h,s,l]);
 }
 
 
 
 /* ********** What follows is the system-specific implementations *********/
 version(Windows) {
-	import std.string;
 
 	SimpleWindow[HWND] windowObjects;
 
@@ -556,6 +683,20 @@ version(Windows) {
 			DeleteDC(hdcMem);
 		}
 
+		void drawPixmap(Sprite s, int x, int y) {
+			BITMAP bm;
+
+			HDC hdcMem = CreateCompatibleDC(hdc);
+			HBITMAP hbmOld = SelectObject(hdcMem, s.handle);
+
+			GetObject(s.handle, bm.sizeof, &bm);
+
+			BitBlt(hdc, x, y, bm.bmWidth, bm.bmHeight, hdcMem, 0, 0, SRCCOPY);
+
+			SelectObject(hdcMem, hbmOld);
+			DeleteDC(hdcMem);
+		}
+
 		void drawText(int x, int y, int x2, int y2, string text) {
 			/*
 			RECT rect;
@@ -636,6 +777,7 @@ version(Windows) {
 			if(!RegisterClass(&wc))
 				throw new Exception("RegisterClass");
 
+			import std.string : toStringz;
 			hwnd = CreateWindow(cn, toStringz(title), WS_OVERLAPPEDWINDOW,
 				CW_USEDEFAULT, CW_USEDEFAULT, width, height,
 				null, null, hInstance, null);
@@ -712,8 +854,9 @@ version(Windows) {
 						handleMouseEvent(mouse);
 				break;
 				case WM_KEYDOWN:
+				case WM_KEYUP:
 					if(handleKeyEvent)
-						handleKeyEvent(wParam);
+						handleKeyEvent(wParam, msg == WM_KEYDOWN);
 				break;
 				case WM_CLOSE:
 				case WM_DESTROY:
@@ -725,19 +868,6 @@ version(Windows) {
 
 					HDC hdc = BeginPaint(hwnd, &ps);
 
-/*
-					if(backingImage !is null) {
-						HDC hdcMem = CreateCompatibleDC(hdc);
-						HBITMAP hbmOld = SelectObject(hdcMem, backingImage.handle);
-
-						GetObject(backingImage.handle, bm.sizeof, &bm);
-
-						BitBlt(hdc, 0, 0, bm.bmWidth, bm.bmHeight, hdcMem, 0, 0, SRCCOPY);
-
-						SelectObject(hdcMem, hbmOld);
-						DeleteDC(hdcMem);
-					}
-*/
 					HDC hdcMem = CreateCompatibleDC(hdc);
 					HBITMAP hbmOld = SelectObject(hdcMem, buffer);
 
@@ -762,10 +892,12 @@ version(Windows) {
 			MSG message;
 			int ret;
 
+			import core.thread;
+
 			if(pulseTimeout) {
 				bool done = false;
 				while(!done) {
-					while(!done && PeekMessage(&message, hwnd, 0, 0, PM_NOREMOVE)) {
+					if(PeekMessage(&message, hwnd, 0, 0, PM_NOREMOVE)) {
 						ret = GetMessage(&message, hwnd, 0, 0);
 						if(ret == 0)
 							done = true;
@@ -793,7 +925,7 @@ version(Windows) {
 
 	mixin template NativeImageImplementation() {
 		HBITMAP handle;
-		byte* rawData;
+		ubyte* rawData;
 
 		void setPixel(int x, int y, Color c) {
 			auto itemsPerLine = ((cast(int) width * 3 + 3) / 4) * 4;
@@ -805,6 +937,51 @@ version(Windows) {
 			rawData[offset + 2] = c.r;
 		}
 
+		void convertToRgbaBytes(ubyte[] where) {
+			assert(where.length == this.width * this.height * 4);
+
+			auto itemsPerLine = ((cast(int) width * 3 + 3) / 4) * 4;
+			int idx = 0;
+			int offset = itemsPerLine * (height - 1);
+			// remember, bmps are upside down
+			for(int y = height - 1; y >= 0; y--) {
+				auto offsetStart = offset;
+				for(int x = 0; x < width; x++) {
+					where[idx + 0] = rawData[offset + 2]; // r
+					where[idx + 1] = rawData[offset + 1]; // g
+					where[idx + 2] = rawData[offset + 0]; // b
+					where[idx + 3] = 255; // a
+					idx += 4; 
+					offset += 3;
+				}
+
+				offset = offsetStart - itemsPerLine;
+			}
+		}
+
+		void setFromRgbaBytes(in ubyte[] what) {
+			assert(what.length == this.width * this.height * 4);
+
+			auto itemsPerLine = ((cast(int) width * 3 + 3) / 4) * 4;
+			int idx = 0;
+			int offset = itemsPerLine * (height - 1);
+			// remember, bmps are upside down
+			for(int y = height - 1; y >= 0; y--) {
+				auto offsetStart = offset;
+				for(int x = 0; x < width; x++) {
+					rawData[offset + 2] = what[idx + 0]; // r
+					rawData[offset + 1] = what[idx + 1]; // g
+					rawData[offset + 0] = what[idx + 2]; // b
+					//where[idx + 3] = 255; // a
+					idx += 4; 
+					offset += 3;
+				}
+
+				offset = offsetStart - itemsPerLine;
+			}
+		}
+
+
 		void createImage(int width, int height) {
 			BITMAPINFO infoheader;
 			infoheader.bmiHeader.biSize = infoheader.bmiHeader.sizeof;
@@ -814,13 +991,15 @@ version(Windows) {
 			infoheader.bmiHeader.biBitCount = 24;
 			infoheader.bmiHeader.biCompression = BI_RGB;
 
-			handle = enforce(CreateDIBSection(
+			handle = CreateDIBSection(
 				null,
 				&infoheader,
 				DIB_RGB_COLORS,
 				cast(void**) &rawData,
 				null,
-				0));
+				0);
+			if(handle is null)
+				throw new Exception("create image failed");
 
 		}
 
@@ -837,7 +1016,6 @@ version(X11) {
 	alias Window NativeWindowHandle;
 
 	enum KEY_ESCAPE = 9;
-	import core.stdc.stdlib;
 
 	mixin template NativeScreenPainterImplementation() {
 		Display* display;
@@ -870,6 +1048,7 @@ version(X11) {
 			XCopyArea(display, d, destiny, gc, 0, 0, this.window.width, this.window.height, 0, 0);
 
 			XFreeGC(display, gc);
+			XFlush(display);
 		}
 
 		bool backgroundIsNotTransparent = true;
@@ -920,7 +1099,12 @@ version(X11) {
 			XPutImage(display, d, gc, i.handle, 0, 0, x, y, i.width, i.height);
 		}
 
+		void drawPixmap(Sprite s, int x, int y) {
+			XCopyArea(display, s.handle, d, gc, 0, 0, s.width, s.height, x, y);
+		}
+
 		void drawText(int x, int y, int x2, int y2, string text) {
+			import std.string : split;
 			foreach(line; text.split("\n")) {
 				XDrawString(display, d, gc, x, y + 12, line.ptr, cast(int) line.length);
 				y += 16;
@@ -988,14 +1172,43 @@ version(X11) {
 	class XDisplayConnection {
 		private static Display* display;
 
-		static Display* get() {
-			if(display is null)
-				display = enforce(XOpenDisplay(null));
+		static Display* get(SimpleWindow window = null) {
+			// FIXME: this shouldn't even be necessary
+			version(with_eventloop)
+				if(window !is null)
+					this.window = window;
+			if(display is null) {
+				display = XOpenDisplay(null);
+				if(display is null)
+					throw new Exception("Unable to open X display");
+				version(with_eventloop) {
+					import arsd.eventloop;
+					addFileEventListeners(display.fd, &eventListener, null, null);
+				}
+			}
 
 			return display;
 		}
 
+		version(with_eventloop) {
+			import arsd.eventloop;
+			static void eventListener(OsFileHandle fd) {
+				while(XPending(display))
+					doXNextEvent(window);
+			}
+
+			static SimpleWindow window;
+		}
+
 		static void close() {
+			if(display is null)
+				return;
+
+			version(with_eventloop) {
+				import arsd.eventloop;
+				removeFileEventListeners(display.fd);
+			}
+
 			XCloseDisplay(display);
 			display = null;
 		}
@@ -1003,14 +1216,15 @@ version(X11) {
 
 	mixin template NativeImageImplementation() {
 		XImage* handle;
-		byte* rawData;
+		ubyte* rawData;
 
 		void createImage(int width, int height) {
 			auto display = XDisplayConnection.get();
 			auto screen = DefaultScreen(display);
 
 			// This actually needs to be malloc to avoid a double free error when XDestroyImage is called
-			rawData = cast(byte*) malloc(width * height * 4);
+			import core.stdc.stdlib : malloc;
+			rawData = cast(ubyte*) malloc(width * height * 4);
 
 			handle = XCreateImage(
 				display,
@@ -1024,6 +1238,8 @@ version(X11) {
 		}
 
 		void dispose() {
+			// note: this calls free(rawData) for us
+			if(handle)
 			XDestroyImage(handle);
 		}
 
@@ -1039,6 +1255,33 @@ version(X11) {
 			rawData[offset + 1] = c.g;
 			rawData[offset + 2] = c.r;
 		}
+
+		void convertToRgbaBytes(ubyte[] where) {
+			assert(where.length == this.width * this.height * 4);
+
+			// if rawData had a length....
+			//assert(rawData.length == where.length);
+			for(int idx = 0; idx < where.length; idx += 4) {
+				where[idx + 0] = rawData[idx + 2]; // r
+				where[idx + 1] = rawData[idx + 1]; // g
+				where[idx + 2] = rawData[idx + 0]; // b
+				where[idx + 3] = 255; // a
+			}
+		}
+
+		void setFromRgbaBytes(in ubyte[] where) {
+			assert(where.length == this.width * this.height * 4);
+
+			// if rawData had a length....
+			//assert(rawData.length == where.length);
+			for(int idx = 0; idx < where.length; idx += 4) {
+				rawData[idx + 2] = where[idx + 0]; // r
+				rawData[idx + 1] = where[idx + 1]; // g
+				rawData[idx + 0] = where[idx + 2]; // b
+				//rawData[idx + 3] = 255; // a
+			}
+		}
+
 	}
 
 	mixin template NativeSimpleWindowImplementation() {
@@ -1053,7 +1296,7 @@ version(X11) {
 		}
 
 		void createWindow(int width, int height, string title) {
-			display = XDisplayConnection.get();
+			display = XDisplayConnection.get(this);
 			auto screen = DefaultScreen(display);
 
 			window = XCreateSimpleWindow(
@@ -1096,11 +1339,14 @@ version(X11) {
 				| EventMask.ButtonPressMask
 				| EventMask.ButtonReleaseMask
 			);
+
+			XFlush(display);
 		}
 
 		void closeWindow() {
 			XFreePixmap(display, buffer);
 			XDestroyWindow(display, window);
+			XFlush(display);
 		}
 
 		void dispose() {
@@ -1109,66 +1355,14 @@ version(X11) {
 		bool destroyed = false;
 
 		int eventLoop(long pulseTimeout) {
-			XEvent e;
 			bool done = false;
+			import core.thread;
 
 			while (!done) {
 			while(!done &&
 				(pulseTimeout == 0 || (XPending(display) > 0)))
 			{
-				XNextEvent(display, &e);
-
-				switch(e.type) {
-				  case EventType.Expose:
-				  	//if(backingImage !is null)
-					//	XPutImage(display, cast(Drawable) window, gc, backingImage.handle, 0, 0, 0, 0, backingImage.width, backingImage.height);
-					XCopyArea(display, cast(Drawable) buffer, cast(Drawable) window, gc, 0, 0, width, height, 0, 0);
-				  break;
-				  case EventType.ClientMessage: // User clicked the close button
-				  case EventType.DestroyNotify:
-					done = true;
-					destroyed = true;
-				  break;
-
-				  case EventType.MotionNotify:
-				  	MouseEvent mouse;
-					auto event = e.xmotion;
-
-					mouse.type = 0;
-					mouse.x = event.x;
-					mouse.y = event.y;
-					mouse.buttonFlags = event.state;
-
-					if(handleMouseEvent)
-						handleMouseEvent(mouse);
-				  break;
-				  case EventType.ButtonPress:
-				  case EventType.ButtonRelease:
-				  	MouseEvent mouse;
-					auto event = e.xbutton;
-
-					mouse.type = e.type == EventType.ButtonPress ? 1 : 2;
-					mouse.x = event.x;
-					mouse.y = event.y;
-					mouse.button = event.button;
-					//mouse.buttonFlags = event.detail;
-
-					if(handleMouseEvent)
-						handleMouseEvent(mouse);
-				  break;
-
-				  case EventType.KeyPress:
-					if(handleCharEvent)
-						handleCharEvent(
-							XKeycodeToKeysym(
-								XDisplayConnection.get(),
-								e.xkey.keycode,
-								0)); // FIXME: we should check shift, etc. too, so it matches Windows' behavior better
-				  	if(handleKeyEvent)
-						handleKeyEvent(e.xkey.keycode);
-				  break;
-				  default:
-				}
+				done = doXNextEvent(this); // FIXME: what about multiple windows? This wasn't originally going to support them but maybe I should
 			}
 				if(!done && pulseTimeout !=0) {
 					if(handlePulse !is null)
@@ -1179,6 +1373,83 @@ version(X11) {
 
 			return 0;
 		}
+	}
+}
+
+version(X11) {
+	bool doXNextEvent(SimpleWindow t) {
+		bool done;
+		XEvent e;
+		XNextEvent(t.display, &e);
+
+		version(with_eventloop)
+			import arsd.eventloop;
+
+		switch(e.type) {
+		  case EventType.Expose:
+			XCopyArea(t.display, cast(Drawable) t.buffer, cast(Drawable) t.window, t.gc, 0, 0, t.width, t.height, 0, 0);
+		  break;
+		  case EventType.ClientMessage: // User clicked the close button
+		  case EventType.DestroyNotify:
+			done = true;
+			t.destroyed = true;
+			version(with_eventloop)
+				exit();
+		  break;
+
+		  case EventType.MotionNotify:
+			MouseEvent mouse;
+			auto event = e.xmotion;
+
+			mouse.type = 0;
+			mouse.x = event.x;
+			mouse.y = event.y;
+			mouse.buttonFlags = event.state;
+
+			if(t.handleMouseEvent)
+				t.handleMouseEvent(mouse);
+		  	version(with_eventloop)
+				send(mouse);
+		  break;
+		  case EventType.ButtonPress:
+		  case EventType.ButtonRelease:
+			MouseEvent mouse;
+			auto event = e.xbutton;
+
+			mouse.type = e.type == EventType.ButtonPress ? 1 : 2;
+			mouse.x = event.x;
+			mouse.y = event.y;
+			mouse.button = event.button;
+			//mouse.buttonFlags = event.detail;
+
+			if(t.handleMouseEvent)
+				t.handleMouseEvent(mouse);
+			version(with_eventloop)
+				send(mouse);
+		  break;
+
+		  case EventType.KeyPress:
+			auto ch = cast(dchar) XKeycodeToKeysym(
+				XDisplayConnection.get(),
+				e.xkey.keycode,
+				0); // FIXME: we should check shift, etc. too, so it matches Windows' behavior better
+
+			if(t.handleCharEvent)
+				t.handleCharEvent(ch);
+			version(with_eventloop)
+				send(ch);
+		  goto case;
+		  case EventType.KeyRelease:
+			if(t.handleKeyEvent)
+				t.handleKeyEvent(e.xkey.keycode, e.type == EventType.ButtonPress);
+
+			version(with_eventloop)
+				send(KeyEvent(e.xkey.keycode, e.type == EventType.ButtonPress));
+		  break;
+		  default:
+		}
+
+		return done;
 	}
 }
 
@@ -1392,18 +1663,24 @@ enum ColorMapNotification:int
 	alias void* XPointer;
 	alias void* XExtData;
 
-	alias uint XID;
+	version( X86_64 ) {
+		alias ulong XID;
+		alias ulong arch_ulong;
+	} else {
+		alias uint XID;
+		alias uint arch_ulong;
+	}
 
 	alias XID Window;
 	alias XID Drawable;
 	alias XID Pixmap;
 
-	alias uint Atom;
+	alias arch_ulong Atom;
 	alias bool Bool;
 	alias Display XDisplay;
 
 	alias int ByteOrder;
-	alias uint Time;
+	alias arch_ulong Time;
 	alias void ScreenFormat;
 
 	struct XImage {
@@ -1418,11 +1695,11 @@ enum ColorMapNotification:int
 	    int depth;					/* depth of image */
 	    int bytes_per_line;			/* accelarator to next line */
 	    int bits_per_pixel;			/* bits per pixel (ZPixmap) */
-	    uint red_mask;	/* bits in z arrangment */
-	    uint green_mask;
-	    uint blue_mask;
+	    arch_ulong red_mask;	/* bits in z arrangment */
+	    arch_ulong green_mask;
+	    arch_ulong blue_mask;
 	    XPointer obdata;			/* hook for the object routines to hang on */
-	    struct f {				/* image manipulation routines */
+	    struct F {				/* image manipulation routines */
 			XImage* function(
 				XDisplay* 			/* display */,
 				Visual*				/* visual */,
@@ -1435,13 +1712,15 @@ enum ColorMapNotification:int
 				int					/* bitmap_pad */,
 				int					/* bytes_per_line */) create_image;
 			int  function(XImage *)destroy_image;
-			uint function(XImage *, int, int)get_pixel;
+			arch_ulong function(XImage *, int, int)get_pixel;
 			int  function(XImage *, int, int, uint)put_pixel;
 			XImage function(XImage *, int, int, uint, uint)sub_image;
 			int function(XImage *, int)add_pixel;
 		}
-	}
 
+		F f;
+	}
+	version(X86_64) static assert(XImage.sizeof == 136);
 
 
 /*
@@ -1450,7 +1729,7 @@ enum ColorMapNotification:int
 struct XKeyEvent
 {
 	int type;			/* of event */
-	uint serial;		/* # of last request processed by server */
+	arch_ulong serial;		/* # of last request processed by server */
 	Bool send_event;	/* true if this came from a SendEvent request */
 	Display *display;	/* Display the event was read from */
 	Window window;	        /* "event" window it is reported relative to */
@@ -1463,13 +1742,14 @@ struct XKeyEvent
 	uint keycode;	/* detail */
 	Bool same_screen;	/* same screen flag */
 }
+version(X86_64) static assert(XKeyEvent.sizeof == 96);
 alias XKeyEvent XKeyPressedEvent;
 alias XKeyEvent XKeyReleasedEvent;
 
 struct XButtonEvent
 {
 	int type;		/* of event */
-	uint serial;	/* # of last request processed by server */
+	arch_ulong serial;	/* # of last request processed by server */
 	Bool send_event;	/* true if this came from a SendEvent request */
 	Display *display;	/* Display the event was read from */
 	Window window;	        /* "event" window it is reported relative to */
@@ -1487,7 +1767,7 @@ alias XButtonEvent XButtonReleasedEvent;
 
 struct XMotionEvent{
 	int type;		/* of event */
-	uint serial;	/* # of last request processed by server */
+	arch_ulong serial;	/* # of last request processed by server */
 	Bool send_event;	/* true if this came from a SendEvent request */
 	Display *display;	/* Display the event was read from */
 	Window window;	        /* "event" window reported relative to */
@@ -1504,7 +1784,7 @@ alias XMotionEvent XPointerMovedEvent;
 
 struct XCrossingEvent{
 	int type;		/* of event */
-	uint serial;	/* # of last request processed by server */
+	arch_ulong serial;	/* # of last request processed by server */
 	Bool send_event;	/* true if this came from a SendEvent request */
 	Display *display;	/* Display the event was read from */
 	Window window;	        /* "event" window reported relative to */
@@ -1528,7 +1808,7 @@ alias XCrossingEvent XLeaveWindowEvent;
 
 struct XFocusChangeEvent{
 	int type;		/* FocusIn or FocusOut */
-	uint serial;	/* # of last request processed by server */
+	arch_ulong serial;	/* # of last request processed by server */
 	Bool send_event;	/* true if this came from a SendEvent request */
 	Display *display;	/* Display the event was read from */
 	Window window;		/* window of event */
@@ -1561,7 +1841,7 @@ XImage *XCreateImage(
     uint	/* depth */,
     int			/* format */,
     int			/* offset */,
-    byte*		/* data */,
+    ubyte*		/* data */,
     uint	/* width */,
     uint	/* height */,
     int			/* bitmap_pad */,
@@ -1692,7 +1972,7 @@ enum EventType:int
 struct XKeymapEvent
 {
 	int type;
-	uint serial;	/* # of last request processed by server */
+	arch_ulong serial;	/* # of last request processed by server */
 	Bool send_event;	/* true if this came from a SendEvent request */
 	Display *display;	/* Display the event was read from */
 	Window window;
@@ -1702,7 +1982,7 @@ struct XKeymapEvent
 struct XExposeEvent
 {
 	int type;
-	uint serial;	/* # of last request processed by server */
+	arch_ulong serial;	/* # of last request processed by server */
 	Bool send_event;	/* true if this came from a SendEvent request */
 	Display *display;	/* Display the event was read from */
 	Window window;
@@ -1713,7 +1993,7 @@ struct XExposeEvent
 
 struct XGraphicsExposeEvent{
 	int type;
-	uint serial;	/* # of last request processed by server */
+	arch_ulong serial;	/* # of last request processed by server */
 	Bool send_event;	/* true if this came from a SendEvent request */
 	Display *display;	/* Display the event was read from */
 	Drawable drawable;
@@ -1726,7 +2006,7 @@ struct XGraphicsExposeEvent{
 
 struct XNoExposeEvent{
 	int type;
-	uint serial;	/* # of last request processed by server */
+	arch_ulong serial;	/* # of last request processed by server */
 	Bool send_event;	/* true if this came from a SendEvent request */
 	Display *display;	/* Display the event was read from */
 	Drawable drawable;
@@ -1736,7 +2016,7 @@ struct XNoExposeEvent{
 
 struct XVisibilityEvent{
 	int type;
-	uint serial;	/* # of last request processed by server */
+	arch_ulong serial;	/* # of last request processed by server */
 	Bool send_event;	/* true if this came from a SendEvent request */
 	Display *display;	/* Display the event was read from */
 	Window window;
@@ -1745,7 +2025,7 @@ struct XVisibilityEvent{
 
 struct XCreateWindowEvent{
 	int type;
-	uint serial;	/* # of last request processed by server */
+	arch_ulong serial;	/* # of last request processed by server */
 	Bool send_event;	/* true if this came from a SendEvent request */
 	Display *display;	/* Display the event was read from */
 	Window parent;		/* parent of the window */
@@ -1759,7 +2039,7 @@ struct XCreateWindowEvent{
 struct XDestroyWindowEvent
 {
 	int type;
-	uint serial;		/* # of last request processed by server */
+	arch_ulong serial;		/* # of last request processed by server */
 	Bool send_event;	/* true if this came from a SendEvent request */
 	Display *display;	/* Display the event was read from */
 	Window event;
@@ -1769,7 +2049,7 @@ struct XDestroyWindowEvent
 struct XUnmapEvent
 {
 	int type;
-	uint serial;		/* # of last request processed by server */
+	arch_ulong serial;		/* # of last request processed by server */
 	Bool send_event;	/* true if this came from a SendEvent request */
 	Display *display;	/* Display the event was read from */
 	Window event;
@@ -1780,7 +2060,7 @@ struct XUnmapEvent
 struct XMapEvent
 {
 	int type;
-	uint serial;		/* # of last request processed by server */
+	arch_ulong serial;		/* # of last request processed by server */
 	Bool send_event;	/* true if this came from a SendEvent request */
 	Display *display;	/* Display the event was read from */
 	Window event;
@@ -1791,7 +2071,7 @@ struct XMapEvent
 struct XMapRequestEvent
 {
 	int type;
-	uint serial;	/* # of last request processed by server */
+	arch_ulong serial;	/* # of last request processed by server */
 	Bool send_event;	/* true if this came from a SendEvent request */
 	Display *display;	/* Display the event was read from */
 	Window parent;
@@ -1801,7 +2081,7 @@ struct XMapRequestEvent
 struct XReparentEvent
 {
 	int type;
-	uint serial;	/* # of last request processed by server */
+	arch_ulong serial;	/* # of last request processed by server */
 	Bool send_event;	/* true if this came from a SendEvent request */
 	Display *display;	/* Display the event was read from */
 	Window event;
@@ -1814,7 +2094,7 @@ struct XReparentEvent
 struct XConfigureEvent
 {
 	int type;
-	uint serial;	/* # of last request processed by server */
+	arch_ulong serial;	/* # of last request processed by server */
 	Bool send_event;	/* true if this came from a SendEvent request */
 	Display *display;	/* Display the event was read from */
 	Window event;
@@ -1829,7 +2109,7 @@ struct XConfigureEvent
 struct XGravityEvent
 {
 	int type;
-	uint serial;	/* # of last request processed by server */
+	arch_ulong serial;	/* # of last request processed by server */
 	Bool send_event;	/* true if this came from a SendEvent request */
 	Display *display;	/* Display the event was read from */
 	Window event;
@@ -1840,7 +2120,7 @@ struct XGravityEvent
 struct XResizeRequestEvent
 {
 	int type;
-	uint serial;	/* # of last request processed by server */
+	arch_ulong serial;	/* # of last request processed by server */
 	Bool send_event;	/* true if this came from a SendEvent request */
 	Display *display;	/* Display the event was read from */
 	Window window;
@@ -1850,7 +2130,7 @@ struct XResizeRequestEvent
 struct  XConfigureRequestEvent
 {
 	int type;
-	uint serial;	/* # of last request processed by server */
+	arch_ulong serial;	/* # of last request processed by server */
 	Bool send_event;	/* true if this came from a SendEvent request */
 	Display *display;	/* Display the event was read from */
 	Window parent;
@@ -1860,13 +2140,13 @@ struct  XConfigureRequestEvent
 	int border_width;
 	Window above;
 	WindowStackingMethod detail;		/* Above, Below, TopIf, BottomIf, Opposite */
-	uint value_mask;
+	arch_ulong value_mask;
 }
 
 struct XCirculateEvent
 {
 	int type;
-	uint serial;	/* # of last request processed by server */
+	arch_ulong serial;	/* # of last request processed by server */
 	Bool send_event;	/* true if this came from a SendEvent request */
 	Display *display;	/* Display the event was read from */
 	Window event;
@@ -1877,7 +2157,7 @@ struct XCirculateEvent
 struct XCirculateRequestEvent
 {
 	int type;
-	uint serial;	/* # of last request processed by server */
+	arch_ulong serial;	/* # of last request processed by server */
 	Bool send_event;	/* true if this came from a SendEvent request */
 	Display *display;	/* Display the event was read from */
 	Window parent;
@@ -1888,7 +2168,7 @@ struct XCirculateRequestEvent
 struct XPropertyEvent
 {
 	int type;
-	uint serial;	/* # of last request processed by server */
+	arch_ulong serial;	/* # of last request processed by server */
 	Bool send_event;	/* true if this came from a SendEvent request */
 	Display *display;	/* Display the event was read from */
 	Window window;
@@ -1900,7 +2180,7 @@ struct XPropertyEvent
 struct XSelectionClearEvent
 {
 	int type;
-	uint serial;	/* # of last request processed by server */
+	arch_ulong serial;	/* # of last request processed by server */
 	Bool send_event;	/* true if this came from a SendEvent request */
 	Display *display;	/* Display the event was read from */
 	Window window;
@@ -1911,7 +2191,7 @@ struct XSelectionClearEvent
 struct XSelectionRequestEvent
 {
 	int type;
-	uint serial;	/* # of last request processed by server */
+	arch_ulong serial;	/* # of last request processed by server */
 	Bool send_event;	/* true if this came from a SendEvent request */
 	Display *display;	/* Display the event was read from */
 	Window owner;
@@ -1925,7 +2205,7 @@ struct XSelectionRequestEvent
 struct XSelectionEvent
 {
 	int type;
-	uint serial;	/* # of last request processed by server */
+	arch_ulong serial;	/* # of last request processed by server */
 	Bool send_event;	/* true if this came from a SendEvent request */
 	Display *display;	/* Display the event was read from */
 	Window requestor;
@@ -1934,11 +2214,12 @@ struct XSelectionEvent
 	Atom property;		/* ATOM or None */
 	Time time;
 }
+version(X86_64) static assert(XSelectionClearEvent.sizeof == 56);
 
 struct XColormapEvent
 {
 	int type;
-	uint serial;	/* # of last request processed by server */
+	arch_ulong serial;	/* # of last request processed by server */
 	Bool send_event;	/* true if this came from a SendEvent request */
 	Display *display;	/* Display the event was read from */
 	Window window;
@@ -1946,27 +2227,31 @@ struct XColormapEvent
 	Bool new_;		/* C++ */
 	ColorMapNotification state;		/* ColormapInstalled, ColormapUninstalled */
 }
+version(X86_64) static assert(XColormapEvent.sizeof == 56);
 
 struct XClientMessageEvent
 {
 	int type;
-	uint serial;	/* # of last request processed by server */
+	arch_ulong serial;	/* # of last request processed by server */
 	Bool send_event;	/* true if this came from a SendEvent request */
 	Display *display;	/* Display the event was read from */
 	Window window;
 	Atom message_type;
 	int format;
-	union data{
+	union Data{
 		byte b[20];
 		short s[10];
-		int l[5];
-		}
+		arch_ulong l[5];
+	}
+	Data data;
+	
 }
+version(X86_64) static assert(XClientMessageEvent.sizeof == 96);
 
 struct XMappingEvent
 {
 	int type;
-	uint serial;	/* # of last request processed by server */
+	arch_ulong serial;	/* # of last request processed by server */
 	Bool send_event;	/* true if this came from a SendEvent request */
 	Display *display;	/* Display the event was read from */
 	Window window;		/* unused */
@@ -1981,8 +2266,8 @@ struct XErrorEvent
 	int type;
 	Display *display;	/* Display the event was read from */
 	XID resourceid;		/* resource id */
-	uint serial;	/* serial number of failed request */
-	uint error_code;	/* error code of failed request */
+	arch_ulong serial;	/* serial number of failed request */
+	ubyte error_code;	/* error code of failed request */
 	ubyte request_code;	/* Major op-code of failed request */
 	ubyte minor_code;	/* Minor op-code of failed request */
 }
@@ -1990,7 +2275,7 @@ struct XErrorEvent
 struct XAnyEvent
 {
 	int type;
-	ubyte serial;	/* # of last request processed by server */
+	arch_ulong serial;	/* # of last request processed by server */
 	Bool send_event;	/* true if this came from a SendEvent request */
 	Display *display;/* Display the event was read from */
 	Window window;	/* window on which event was requested in event mask */
@@ -2029,7 +2314,7 @@ union XEvent{
 	XMappingEvent xmapping;
 	XErrorEvent xerror;
 	XKeymapEvent xkeymap;
-	int pad[24];
+	arch_ulong pad[24];
 }
 
 
@@ -2057,8 +2342,8 @@ union XEvent{
 		_XPrivate *private9;
 		_XPrivate *private10;
 		int qlen;		/* Length of input event queue */
-		uint last_request_read; /* seq number of last event read */
-		uint request;	/* sequence number of last request. */
+		arch_ulong last_request_read; /* seq number of last event read */
+		arch_ulong request;	/* sequence number of last request. */
 		XPointer private11;
 		XPointer private12;
 		XPointer private13;
@@ -2070,8 +2355,8 @@ union XEvent{
 		int default_screen;	/* default screen for operations */
 		int nscreens;		/* number of screens on this server*/
 		Screen *screens;	/* pointer to list of screens */
-		uint motion_buffer;	/* size of motion buffer */
-		uint private16;
+		arch_ulong motion_buffer;	/* size of motion buffer */
+		arch_ulong private16;
 		int min_keycode;	/* minimum defined keycode */
 		int max_keycode;	/* maximum defined keycode */
 		XPointer private17;
@@ -2079,6 +2364,20 @@ union XEvent{
 		int private19;
 		byte *xdefaults;	/* contents of defaults from server */
 		/* there is more to this structure, but it is private to Xlib */
+	}
+
+	// I got these numbers from a C program as a sanity test
+	version(X86_64) {
+		static assert(Display.sizeof == 296);
+		static assert(XPointer.sizeof == 8);
+		static assert(XErrorEvent.sizeof == 40);
+		static assert(XAnyEvent.sizeof == 40);
+		static assert(XMappingEvent.sizeof == 56);
+		static assert(XEvent.sizeof == 192);
+	} else {
+		static assert(Display.sizeof == 176);
+		static assert(XPointer.sizeof == 4);
+		static assert(XEvent.sizeof == 96);
 	}
 
 struct Depth
@@ -2127,7 +2426,8 @@ struct Visual
 	alias Display* _XPrivDisplay;
 
 	Screen* ScreenOfDisplay(Display* dpy, int scr) {
-		return (&(cast(_XPrivDisplay)dpy).screens[scr]);
+		assert(dpy !is null);
+		return &dpy.screens[scr];
 	}
 
 	Window	RootWindow(Display *dpy,int scr) {
@@ -2154,6 +2454,7 @@ struct Visual
 		return ScreenOfDisplay(dpy,scr).white_pixel;
 	}
 
+	// check out Xft too: http://www.keithp.com/~keithp/render/Xft.tutorial
 	int XDrawString(Display*, Drawable, GC, int, int, in char*, int);
 	int XDrawLine(Display*, Drawable, GC, int, int, int, int);
 	int XDrawRectangle(Display*, Drawable, GC, int, int, uint, uint);
@@ -2177,6 +2478,7 @@ struct Visual
 	int XFreePixmap(Display*, Pixmap);
 	int XCopyArea(Display*, Drawable, Drawable, GC, int, int, uint, uint, int, int);
 	int XFlush(Display*);
+	int XSync(Display*, bool);
 
 	struct XPoint {
 		short x;
@@ -2201,11 +2503,799 @@ struct Visual
 		const(char)* value;		/* same as Property routines */
 		Atom encoding;			/* prop type */
 		int format;				/* prop data format: 8, 16, or 32 */
-		uint nitems;		/* number of data items in value */
+		arch_ulong nitems;		/* number of data items in value */
+	}
+
+	version( X86_64 ) {
+		static assert(XTextProperty.sizeof == 32);
 	}
 
 	void XSetWMName(Display*, Window, XTextProperty*);
 
 	enum Atom XA_STRING = 31;
 
-} else static assert(0, "Unsupported operating system");
+
+ } else version (OSXCocoa) {
+private:
+    alias void* id;
+    alias void* Class;
+    alias void* SEL;
+    alias void* IMP;
+    alias void* Ivar;
+    alias byte BOOL;
+    alias const(void)* CFStringRef;
+    alias const(void)* CFAllocatorRef;
+    alias const(void)* CFTypeRef;
+    alias const(void)* CGContextRef;
+    alias const(void)* CGColorSpaceRef;
+    alias const(void)* CGImageRef;
+    alias uint CGBitmapInfo;
+    
+    struct objc_super {
+        id self;
+        Class superclass;
+    }
+    
+    struct CFRange {
+        int location, length;
+    }
+
+    struct NSPoint {
+        float x, y;
+        
+        static fromTuple(T)(T tupl) {
+            return NSPoint(tupl.tupleof);
+        }
+    }
+    struct NSSize {
+        float width, height;
+    }
+    struct NSRect {
+        NSPoint origin;
+        NSSize size;
+    }
+    alias NSPoint CGPoint;
+    alias NSSize CGSize;
+    alias NSRect CGRect;
+
+    struct CGAffineTransform {
+        float a, b, c, d, tx, ty;
+    }
+
+    enum NSApplicationActivationPolicyRegular = 0;
+    enum NSBackingStoreBuffered = 2;
+    enum kCFStringEncodingUTF8 = 0x08000100;
+
+    enum : size_t {
+        NSBorderlessWindowMask = 0,
+        NSTitledWindowMask = 1 << 0,
+        NSClosableWindowMask = 1 << 1,
+        NSMiniaturizableWindowMask = 1 << 2,
+        NSResizableWindowMask = 1 << 3,
+        NSTexturedBackgroundWindowMask = 1 << 8
+    }
+    
+    enum : uint {
+        kCGImageAlphaNone,
+        kCGImageAlphaPremultipliedLast,
+        kCGImageAlphaPremultipliedFirst,
+        kCGImageAlphaLast,
+        kCGImageAlphaFirst,
+        kCGImageAlphaNoneSkipLast,
+        kCGImageAlphaNoneSkipFirst
+    }
+    enum : uint {
+        kCGBitmapAlphaInfoMask = 0x1F,
+        kCGBitmapFloatComponents = (1 << 8),
+        kCGBitmapByteOrderMask = 0x7000,
+        kCGBitmapByteOrderDefault = (0 << 12),
+        kCGBitmapByteOrder16Little = (1 << 12),
+        kCGBitmapByteOrder32Little = (2 << 12),
+        kCGBitmapByteOrder16Big = (3 << 12),
+        kCGBitmapByteOrder32Big = (4 << 12)
+    }
+    enum CGPathDrawingMode {
+        kCGPathFill,
+        kCGPathEOFill,
+        kCGPathStroke,
+        kCGPathFillStroke,
+        kCGPathEOFillStroke
+    }
+    enum objc_AssociationPolicy : size_t {
+        OBJC_ASSOCIATION_ASSIGN = 0,
+        OBJC_ASSOCIATION_RETAIN_NONATOMIC = 1,
+        OBJC_ASSOCIATION_COPY_NONATOMIC = 3,
+        OBJC_ASSOCIATION_RETAIN = 0x301, //01401,
+        OBJC_ASSOCIATION_COPY = 0x303 //01403
+    };
+
+    extern(C) {
+        id objc_msgSend(id receiver, SEL selector, ...);
+        id objc_msgSendSuper(objc_super* superStruct, SEL selector, ...);
+        id objc_getClass(const(char)* name);
+        SEL sel_registerName(const(char)* str);
+        Class objc_allocateClassPair(Class superclass, const(char)* name,
+                                     size_t extra_bytes);
+        void objc_registerClassPair(Class cls);
+        BOOL class_addMethod(Class cls, SEL name, IMP imp, const(char)* types);
+        id objc_getAssociatedObject(id object, void* key);
+        void objc_setAssociatedObject(id object, void* key, id value,
+                                      objc_AssociationPolicy policy);
+        Ivar class_getInstanceVariable(Class cls, const(char)* name);
+        id object_getIvar(id object, Ivar ivar);
+        void object_setIvar(id object, Ivar ivar, id value);
+        BOOL class_addIvar(Class cls, const(char)* name,
+                           size_t size, ubyte alignment, const(char)* types);
+
+        extern __gshared id NSApp;
+            
+        void CFRelease(CFTypeRef obj);
+            
+        CFStringRef CFStringCreateWithBytes(CFAllocatorRef allocator,
+                                            const(char)* bytes, int numBytes,
+                                            int encoding,
+                                            BOOL isExternalRepresentation);
+        int CFStringGetBytes(CFStringRef theString, CFRange range, int encoding,
+                             char lossByte, bool isExternalRepresentation,
+                             char* buffer, int maxBufLen, int* usedBufLen);
+        int CFStringGetLength(CFStringRef theString);
+        
+        CGContextRef CGBitmapContextCreate(void* data,
+                                           size_t width, size_t height,
+                                           size_t bitsPerComponent,
+                                           size_t bytesPerRow,
+                                           CGColorSpaceRef colorspace,
+                                           CGBitmapInfo bitmapInfo);
+        void CGContextRelease(CGContextRef c);
+        ubyte* CGBitmapContextGetData(CGContextRef c);
+        CGImageRef CGBitmapContextCreateImage(CGContextRef c);
+        size_t CGBitmapContextGetWidth(CGContextRef c);
+        size_t CGBitmapContextGetHeight(CGContextRef c);
+                
+        CGColorSpaceRef CGColorSpaceCreateDeviceRGB();
+        void CGColorSpaceRelease(CGColorSpaceRef cs);
+        
+        void CGContextSetRGBStrokeColor(CGContextRef c,
+                                        float red, float green, float blue,
+                                        float alpha);
+        void CGContextSetRGBFillColor(CGContextRef c,
+                                      float red, float green, float blue,
+                                      float alpha);
+        void CGContextDrawImage(CGContextRef c, CGRect rect, CGImageRef image);
+        void CGContextShowTextAtPoint(CGContextRef c, float x, float y,
+                                      const(char)* str, size_t length);
+        void CGContextStrokeLineSegments(CGContextRef c,
+                                         const(CGPoint)* points, size_t count);
+        
+        void CGContextBeginPath(CGContextRef c);
+        void CGContextDrawPath(CGContextRef c, CGPathDrawingMode mode);
+        void CGContextAddEllipseInRect(CGContextRef c, CGRect rect);
+        void CGContextAddArc(CGContextRef c, float x, float y, float radius,
+                             float startAngle, float endAngle, int clockwise);
+        void CGContextAddRect(CGContextRef c, CGRect rect);
+        void CGContextAddLines(CGContextRef c,
+                               const(CGPoint)* points, size_t count);
+        void CGContextSaveGState(CGContextRef c);
+        void CGContextRestoreGState(CGContextRef c);
+        void CGContextSelectFont(CGContextRef c, const(char)* name, float size,
+                                 uint textEncoding);
+        CGAffineTransform CGContextGetTextMatrix(CGContextRef c);
+        void CGContextSetTextMatrix(CGContextRef c, CGAffineTransform t);
+        
+        void CGImageRelease(CGImageRef image);
+    }
+    
+private:
+    // A convenient method to create a CFString (=NSString) from a D string.
+    CFStringRef createCFString(string str) {
+        return CFStringCreateWithBytes(null, str.ptr, str.length,
+                                             kCFStringEncodingUTF8, false);
+    }
+    
+    // Objective-C calls.
+    RetType objc_msgSend_specialized(string selector, RetType, T...)(id self, T args) {
+        auto _cmd = sel_registerName(selector.ptr);
+        alias extern(C) RetType function(id, SEL, T) ExpectedType;
+        return (cast(ExpectedType)&objc_msgSend)(self, _cmd, args);
+    }
+    RetType objc_msgSend_classMethod(string selector, RetType, T...)(const(char)* className, T args) {
+        auto _cmd = sel_registerName(selector.ptr);
+        auto cls = objc_getClass(className);
+        alias extern(C) RetType function(id, SEL, T) ExpectedType;
+        return (cast(ExpectedType)&objc_msgSend)(cls, _cmd, args);
+    }
+    RetType objc_msgSend_classMethod(string className, string selector, RetType, T...)(T args) {
+        return objc_msgSend_classMethod!(selector, RetType, T)(className.ptr, args);
+    }
+    
+    alias objc_msgSend_specialized!("setNeedsDisplay:", void, BOOL) setNeedsDisplay;
+    alias objc_msgSend_classMethod!("alloc", id) alloc;
+    alias objc_msgSend_specialized!("initWithContentRect:styleMask:backing:defer:",
+                                    id, NSRect, size_t, size_t, BOOL) initWithContentRect;
+    alias objc_msgSend_specialized!("setTitle:", void, CFStringRef) setTitle;
+    alias objc_msgSend_specialized!("center", void) center;
+    alias objc_msgSend_specialized!("initWithFrame:", id, NSRect) initWithFrame;
+    alias objc_msgSend_specialized!("setContentView:", void, id) setContentView;
+    alias objc_msgSend_specialized!("release", void) release;
+    alias objc_msgSend_classMethod!("NSColor", "whiteColor", id) whiteNSColor;
+    alias objc_msgSend_specialized!("setBackgroundColor:", void, id) setBackgroundColor;
+    alias objc_msgSend_specialized!("makeKeyAndOrderFront:", void, id) makeKeyAndOrderFront;
+    alias objc_msgSend_specialized!("invalidate", void) invalidate;
+    alias objc_msgSend_specialized!("close", void) close;
+    alias objc_msgSend_classMethod!("NSTimer", "scheduledTimerWithTimeInterval:target:selector:userInfo:repeats:",
+                                    id, double, id, SEL, id, BOOL) scheduledTimer;
+    alias objc_msgSend_specialized!("run", void) run;
+    alias objc_msgSend_classMethod!("NSGraphicsContext", "currentContext",
+                                    id) currentNSGraphicsContext;
+    alias objc_msgSend_specialized!("graphicsPort", CGContextRef) graphicsPort;
+    alias objc_msgSend_specialized!("characters", CFStringRef) characters;
+    alias objc_msgSend_specialized!("superclass", Class) superclass;
+    alias objc_msgSend_specialized!("init", id) init;
+    alias objc_msgSend_specialized!("addItem:", void, id) addItem;
+    alias objc_msgSend_specialized!("setMainMenu:", void, id) setMainMenu;
+    alias objc_msgSend_specialized!("initWithTitle:action:keyEquivalent:",
+                                    id, CFStringRef, SEL, CFStringRef) initWithTitle;
+    alias objc_msgSend_specialized!("setSubmenu:", void, id) setSubmenu;
+    alias objc_msgSend_specialized!("setDelegate:", void, id) setDelegate;
+    alias objc_msgSend_specialized!("activateIgnoringOtherApps:",
+                                    void, BOOL) activateIgnoringOtherApps;
+    alias objc_msgSend_classMethod!("NSApplication", "sharedApplication",
+                                    id) sharedNSApplication;
+    alias objc_msgSend_specialized!("setActivationPolicy:", void, ptrdiff_t) setActivationPolicy;
+} else version(html5) {} else static assert(0, "Unsupported operating system");
+
+
+version(OSXCocoa) {
+	// I don't know anything about the Mac, but a couple years ago, KennyTM on the newsgroup wrote this for me
+	//
+	// http://forum.dlang.org/thread/innr0v$1deh$1@digitalmars.com?page=4#post-int88l:24uaf:241:40digitalmars.com
+	// https://github.com/kennytm/simpledisplay.d/blob/osx/simpledisplay.d
+	//
+	// and it is about time I merged it in here. It is available with -version=OSXCocoa until someone tests it for me!
+	// Probably won't even fully compile right now
+
+    import std.math : PI;
+    import std.algorithm : map;
+    import std.array : array;
+    
+    alias SimpleWindow NativeWindowHandle;
+    alias void delegate(id) NativeEventHandler;
+
+    static Ivar simpleWindowIvar;
+    
+    enum KEY_ESCAPE = 27;
+
+    mixin template NativeImageImplementation() {
+        CGContextRef context;
+        ubyte* rawData;
+
+	void convertToRgbaBytes(ubyte[] where) {
+		assert(where.length == this.width * this.height * 4);
+
+		// if rawData had a length....
+		//assert(rawData.length == where.length);
+		for(int idx = 0; idx < where.length; idx += 4) {
+			auto alpha = rawData[idx + 3];
+			if(alpha == 255) {
+				where[idx + 0] = rawData[idx + 0]; // r
+				where[idx + 1] = rawData[idx + 1]; // g
+				where[idx + 2] = rawData[idx + 2]; // b
+				where[idx + 3] = rawData[idx + 3]; // a
+			} else {
+				where[idx + 0] = cast(ubyte)(rawData[idx + 0] * 255 / alpha); // r
+				where[idx + 1] = cast(ubyte)(rawData[idx + 1] * 255 / alpha); // g
+				where[idx + 2] = cast(ubyte)(rawData[idx + 2] * 255 / alpha); // b
+				where[idx + 3] = rawData[idx + 3]; // a
+
+			}
+		}
+	}
+
+	void setFromRgbaBytes(in ubyte[] where) {
+		// FIXME: this is probably wrong
+		assert(where.length == this.width * this.height * 4);
+
+		// if rawData had a length....
+		//assert(rawData.length == where.length);
+		for(int idx = 0; idx < where.length; idx += 4) {
+			auto alpha = rawData[idx + 3];
+			if(alpha == 255) {
+				rawData[idx + 0] = where[idx + 0]; // r
+				rawData[idx + 1] = where[idx + 1]; // g
+				rawData[idx + 2] = where[idx + 2]; // b
+				rawData[idx + 3] = where[idx + 3]; // a
+			} else {
+				rawData[idx + 0] = cast(ubyte)(where[idx + 0] * 255 / alpha); // r
+				rawData[idx + 1] = cast(ubyte)(where[idx + 1] * 255 / alpha); // g
+				rawData[idx + 2] = cast(ubyte)(where[idx + 2] * 255 / alpha); // b
+				rawData[idx + 3] = where[idx + 3]; // a
+
+			}
+		}
+	}
+
+        
+        void createImage(int width, int height) {
+            auto colorSpace = CGColorSpaceCreateDeviceRGB();
+            context = CGBitmapContextCreate(null, width, height, 8, 4*width,
+                                            colorSpace,
+                                            kCGImageAlphaPremultipliedLast
+                                                   |kCGBitmapByteOrder32Big);
+            CGColorSpaceRelease(colorSpace);
+            rawData = CGBitmapContextGetData(context);
+        }
+        void dispose() {
+            CGContextRelease(context);
+        }
+        
+        void setPixel(int x, int y, Color c) {
+            auto offset = (y * width + x) * 4;
+            if (c.a == 255) {
+                rawData[offset + 0] = c.r;
+                rawData[offset + 1] = c.g;
+                rawData[offset + 2] = c.b;
+                rawData[offset + 3] = c.a;
+            } else {
+                rawData[offset + 0] = cast(ubyte)(c.r*c.a/255);
+                rawData[offset + 1] = cast(ubyte)(c.g*c.a/255);
+                rawData[offset + 2] = cast(ubyte)(c.b*c.a/255);
+                rawData[offset + 3] = c.a;
+            }
+        }
+    }
+    
+    mixin template NativeScreenPainterImplementation() {
+        CGContextRef context;
+        ubyte[4] _outlineComponents;
+        
+        void create(NativeWindowHandle window) {
+            context = window.drawingContext;
+        }
+        
+        void dispose() {
+        }
+        
+        @property void outlineColor(Color color) {
+            float alphaComponent = color.a/255.0f;
+            CGContextSetRGBStrokeColor(context,
+                                       color.r/255.0f, color.g/255.0f, color.b/255.0f, alphaComponent);
+
+            if (color.a != 255) {
+                _outlineComponents[0] = cast(ubyte)(color.r*color.a/255);
+                _outlineComponents[1] = cast(ubyte)(color.g*color.a/255);
+                _outlineComponents[2] = cast(ubyte)(color.b*color.a/255);
+                _outlineComponents[3] = color.a;
+            } else {
+                _outlineComponents[0] = color.r;
+                _outlineComponents[1] = color.g;
+                _outlineComponents[2] = color.b;
+                _outlineComponents[3] = color.a;
+            }
+        }
+        
+        @property void fillColor(Color color) {
+            CGContextSetRGBFillColor(context,
+                                     color.r/255.0f, color.g/255.0f, color.b/255.0f, color.a/255.0f);
+        }
+        
+        void drawImage(int x, int y, Image image) {
+            auto cgImage = CGBitmapContextCreateImage(image.context);
+            auto size = CGSize(CGBitmapContextGetWidth(image.context),
+                               CGBitmapContextGetHeight(image.context));
+            CGContextDrawImage(context, CGRect(CGPoint(x, y), size), cgImage);
+            CGImageRelease(cgImage);
+        }
+ 
+        void drawPixmap(Sprite image, int x, int y) {
+		// FIXME: is this efficient?
+            auto cgImage = CGBitmapContextCreateImage(image.context);
+            auto size = CGSize(CGBitmapContextGetWidth(image.context),
+                               CGBitmapContextGetHeight(image.context));
+            CGContextDrawImage(context, CGRect(CGPoint(x, y), size), cgImage);
+            CGImageRelease(cgImage);
+        }
+
+        
+        void drawText(int x, int y, int x2, int y2, string text) {
+            if (_outlineComponents[3] != 0) {
+                CGContextSaveGState(context);
+                auto invAlpha = 1.0f/_outlineComponents[3];
+                CGContextSetRGBFillColor(context, _outlineComponents[0]*invAlpha,
+                                                  _outlineComponents[1]*invAlpha,
+                                                  _outlineComponents[2]*invAlpha,
+                                                  _outlineComponents[3]/255.0f);
+                CGContextShowTextAtPoint(context, x, y, text.ptr, text.length);
+// auto cfstr = cast(id)createCFString(text);
+// objc_msgSend(cfstr, sel_registerName("drawAtPoint:withAttributes:"),
+// NSPoint(x, y), null);
+// CFRelease(cfstr);
+                CGContextRestoreGState(context);
+            }
+        }
+
+        void drawPixel(int x, int y) {
+            auto rawData = CGBitmapContextGetData(context);
+            auto width = CGBitmapContextGetWidth(context);
+            auto height = CGBitmapContextGetHeight(context);
+            auto offset = ((height - y - 1) * width + x) * 4;
+            rawData[offset .. offset+4] = _outlineComponents;
+        }
+        
+        void drawLine(int x1, int y1, int x2, int y2) {
+            CGPoint[2] linePoints;
+            linePoints[0] = CGPoint(x1, y1);
+            linePoints[1] = CGPoint(x2, y2);
+            CGContextStrokeLineSegments(context, linePoints.ptr, linePoints.length);
+        }
+
+        void drawRectangle(int x, int y, int width, int height) {
+            CGContextBeginPath(context);
+            auto rect = CGRect(CGPoint(x, y), CGSize(width, height));
+            CGContextAddRect(context, rect);
+            CGContextDrawPath(context, CGPathDrawingMode.kCGPathFillStroke);
+        }
+        
+        void drawEllipse(int x1, int y1, int x2, int y2) {
+            CGContextBeginPath(context);
+            auto rect = CGRect(CGPoint(x1, y1), CGSize(x2-x1, y2-y1));
+            CGContextAddEllipseInRect(context, rect);
+            CGContextDrawPath(context, CGPathDrawingMode.kCGPathFillStroke);
+        }
+        
+        void drawArc(int x1, int y1, int width, int height, int start, int finish) {
+            // @@@BUG@@@ Does not support elliptic arc (width != height).
+            CGContextBeginPath(context);
+            CGContextAddArc(context, x1+width*0.5f, y1+height*0.5f, width,
+                            start*PI/(180*64), finish*PI/(180*64), 0);
+            CGContextDrawPath(context, CGPathDrawingMode.kCGPathFillStroke);
+        }
+        
+        void drawPolygon(Point[] intPoints) {
+            CGContextBeginPath(context);
+            auto points = array(map!(CGPoint.fromTuple)(intPoints));
+            CGContextAddLines(context, points.ptr, points.length);
+            CGContextDrawPath(context, CGPathDrawingMode.kCGPathFillStroke);
+        }
+    }
+    
+    mixin template NativeSimpleWindowImplementation() {
+        void createWindow(int width, int height, string title) {
+            synchronized {
+                if (NSApp == null) initializeApp();
+            }
+            
+            auto contentRect = NSRect(NSPoint(0, 0), NSSize(width, height));
+            
+            // create the window.
+            window = initWithContentRect(alloc("NSWindow"),
+                                         contentRect,
+                                         NSTitledWindowMask
+                                            |NSClosableWindowMask
+                                            |NSMiniaturizableWindowMask
+                                            |NSResizableWindowMask,
+                                         NSBackingStoreBuffered,
+                                         true);
+
+            // set the title & move the window to center.
+            auto windowTitle = createCFString(title);
+            setTitle(window, windowTitle);
+            CFRelease(windowTitle);
+            center(window);
+            
+            // create area to draw on.
+            auto colorSpace = CGColorSpaceCreateDeviceRGB();
+            drawingContext = CGBitmapContextCreate(null, width, height,
+                                                   8, 4*width, colorSpace,
+                                                   kCGImageAlphaPremultipliedLast
+                                                      |kCGBitmapByteOrder32Big);
+            CGColorSpaceRelease(colorSpace);
+            CGContextSelectFont(drawingContext, "Lucida Grande", 12.0f, 1);
+            auto matrix = CGContextGetTextMatrix(drawingContext);
+            matrix.c = -matrix.c;
+            matrix.d = -matrix.d;
+            CGContextSetTextMatrix(drawingContext, matrix);
+            
+            // create the subview that things will be drawn on.
+            view = initWithFrame(alloc("SDGraphicsView"), contentRect);
+            setContentView(window, view);
+            object_setIvar(view, simpleWindowIvar, cast(id)this);
+            release(view);
+
+            setBackgroundColor(window, whiteNSColor);
+            makeKeyAndOrderFront(window, null);
+        }
+        void dispose() {
+            closeWindow();
+            release(window);
+        }
+        void closeWindow() {
+            invalidate(timer);
+            .close(window);
+        }
+        
+        ScreenPainter getPainter() {
+		return ScreenPainter(this, this);
+	}
+        
+        int eventLoop(long pulseTimeout) {
+            if (handlePulse !is null && pulseTimeout != 0) {
+                timer = scheduledTimer(pulseTimeout*1e-3,
+                                       view, sel_registerName("simpledisplay_pulse"),
+                                       null, true);
+            }
+            
+            setNeedsDisplay(view, true);
+            run(NSApp);
+            return 0;
+        }
+        
+        id window;
+        id timer;
+        id view;
+        CGContextRef drawingContext;
+    }
+    
+    extern(C) {
+    private:
+        BOOL returnTrue3(id self, SEL _cmd, id app) {
+            return true;
+        }
+        BOOL returnTrue2(id self, SEL _cmd) {
+            return true;
+        }
+        
+        void pulse(id self, SEL _cmd) {
+            auto simpleWindow = cast(SimpleWindow)object_getIvar(self, simpleWindowIvar);
+            simpleWindow.handlePulse();
+            setNeedsDisplay(self, true);
+        }
+        void drawRect(id self, SEL _cmd, NSRect rect) {
+            auto simpleWindow = cast(SimpleWindow)object_getIvar(self, simpleWindowIvar);
+            auto curCtx = graphicsPort(currentNSGraphicsContext);
+            auto cgImage = CGBitmapContextCreateImage(simpleWindow.drawingContext);
+            auto size = CGSize(CGBitmapContextGetWidth(simpleWindow.drawingContext),
+                               CGBitmapContextGetHeight(simpleWindow.drawingContext));
+            CGContextDrawImage(curCtx, CGRect(CGPoint(0, 0), size), cgImage);
+            CGImageRelease(cgImage);
+        }
+        void keyDown(id self, SEL _cmd, id event) {
+            auto simpleWindow = cast(SimpleWindow)object_getIvar(self, simpleWindowIvar);
+
+            // the event may have multiple characters, and we send them all at
+            // once.
+            if (simpleWindow.handleCharEvent || simpleWindow.handleKeyEvent) {
+                auto chars = characters(event);
+                auto range = CFRange(0, CFStringGetLength(chars));
+                auto buffer = new char[range.length*3];
+                int actualLength;
+                CFStringGetBytes(chars, range, kCFStringEncodingUTF8, 0, false,
+                                 buffer.ptr, buffer.length, &actualLength);
+                foreach (dchar dc; buffer[0..actualLength]) {
+                    if (simpleWindow.handleCharEvent)
+                        simpleWindow.handleCharEvent(dc);
+                    if (simpleWindow.handleKeyEvent)
+                        simpleWindow.handleKeyEvent(dc, true); // FIXME: what about keyUp?
+                }
+            }
+            
+            // the event's 'keyCode' is hardware-dependent. I don't think people
+            // will like it. Let's leave it to the native handler.
+            
+            // perform the default action.
+            auto superData = objc_super(self, superclass(self));
+            alias extern(C) void function(objc_super*, SEL, id) T;
+            (cast(T)&objc_msgSendSuper)(&superData, _cmd, event);
+        }
+    }
+    
+    // initialize the app so that it can be interacted with the user.
+    // based on http://cocoawithlove.com/2010/09/minimalist-cocoa-programming.html
+    private void initializeApp() {
+        // push an autorelease pool to avoid leaking.
+        init(alloc("NSAutoreleasePool"));
+        
+        // create a new NSApp instance
+        sharedNSApplication;
+        setActivationPolicy(NSApp, NSApplicationActivationPolicyRegular);
+        
+        // create the "Quit" menu.
+        auto menuBar = init(alloc("NSMenu"));
+        auto appMenuItem = init(alloc("NSMenuItem"));
+        addItem(menuBar, appMenuItem);
+        setMainMenu(NSApp, menuBar);
+        release(appMenuItem);
+        release(menuBar);
+        
+        auto appMenu = init(alloc("NSMenu"));
+        auto quitTitle = createCFString("Quit");
+        auto q = createCFString("q");
+        auto quitItem = initWithTitle(alloc("NSMenuItem"),
+                                      quitTitle, sel_registerName("terminate:"), q);
+        addItem(appMenu, quitItem);
+        setSubmenu(appMenuItem, appMenu);
+        release(quitItem);
+        release(appMenu);
+        CFRelease(q);
+        CFRelease(quitTitle);
+
+        // assign a delegate for the application, allow it to quit when the last
+        // window is closed.
+        auto delegateClass = objc_allocateClassPair(objc_getClass("NSObject"),
+                                                    "SDWindowCloseDelegate", 0);
+        class_addMethod(delegateClass,
+                        sel_registerName("applicationShouldTerminateAfterLastWindowClosed:"),
+                        &returnTrue3, "c@:@");
+        objc_registerClassPair(delegateClass);
+    
+        auto appDelegate = init(alloc("SDWindowCloseDelegate"));
+        setDelegate(NSApp, appDelegate);
+        activateIgnoringOtherApps(NSApp, true);
+
+        // create a new view that draws the graphics and respond to keyDown
+        // events.
+        auto viewClass = objc_allocateClassPair(objc_getClass("NSView"),
+                                                "SDGraphicsView", (void*).sizeof);
+        class_addIvar(viewClass, "simpledisplay_simpleWindow",
+                      (void*).sizeof, (void*).alignof, "^v");
+        class_addMethod(viewClass, sel_registerName("simpledisplay_pulse"),
+                        &pulse, "v@:");
+        class_addMethod(viewClass, sel_registerName("drawRect:"),
+                        &drawRect, "v@:{NSRect={NSPoint=ff}{NSSize=ff}}");
+        class_addMethod(viewClass, sel_registerName("isFlipped"),
+                        &returnTrue2, "c@:");
+        class_addMethod(viewClass, sel_registerName("acceptsFirstResponder"),
+                        &returnTrue2, "c@:");
+        class_addMethod(viewClass, sel_registerName("keyDown:"),
+                        &keyDown, "v@:@");
+        objc_registerClassPair(viewClass);
+        simpleWindowIvar = class_getInstanceVariable(viewClass,
+                                                     "simpledisplay_simpleWindow");
+    }
+}
+
+version(html5) {
+	import arsd.cgi;
+
+	alias int NativeWindowHandle;
+	alias void delegate() NativeEventHandler;
+
+	mixin template NativeImageImplementation() {
+		static import arsd.image;
+		arsd.image.TrueColorImage handle;
+
+		void createImage(int width, int height) {
+			handle = new arsd.image.TrueColorImage(width, height);
+		}
+
+		void dispose() {
+			handle = null;
+		}
+
+		void setPixel(int x, int y, Color c) {
+			auto offset = (y * width + x) * 4;
+			handle.data[offset + 0] = c.b;
+			handle.data[offset + 1] = c.g;
+			handle.data[offset + 2] = c.r;
+			handle.data[offset + 3] = c.a;
+		}
+
+		void convertToRgbaBytes(ubyte[] where) {
+			if(where is handle.data)
+				return;
+			assert(where.length == this.width * this.height * 4);
+
+			where[] = handle.data[];
+		}
+
+		void setFromRgbaBytes(in ubyte[] where) {
+			if(where is handle.data)
+				return;
+			assert(where.length == this.width * this.height * 4);
+
+			handle.data[] = where[];
+		}
+
+	}
+
+	mixin template NativeScreenPainterImplementation() {
+		void create(NativeWindowHandle window) {
+		}
+
+		void dispose() {
+		}
+		@property void outlineColor(Color c) {
+		}
+
+		@property void fillColor(Color c) {
+		}
+
+		void drawImage(int x, int y, Image i) {
+		}
+
+		void drawPixmap(Sprite s, int x, int y) {
+		}
+
+		void drawText(int x, int y, int x2, int y2, string text) {
+		}
+
+		void drawPixel(int x, int y) {
+		}
+
+		void drawLine(int x1, int y1, int x2, int y2) {
+		}
+
+		void drawRectangle(int x, int y, int width, int height) {
+		}
+
+		/// Arguments are the points of the bounding rectangle
+		void drawEllipse(int x1, int y1, int x2, int y2) {
+		}
+
+		void drawArc(int x1, int y1, int width, int height, int start, int finish) {
+			// FIXME: start X, start Y, end X, end Y
+			//Arc(hdc, x1, y1, x1 + width, y1 + height, 0, 0, 0, 0);
+		}
+
+		void drawPolygon(Point[] vertexes) {
+		}
+
+	}
+
+	/// on html5 mode you MUST set this socket up
+	WebSocket socket;
+
+	mixin template NativeSimpleWindowImplementation() {
+		ScreenPainter getPainter() {
+			return ScreenPainter(this, 0);
+		}
+
+		void createWindow(int width, int height, string title) {
+			Html5.createCanvas(width, height);
+		}
+
+		void closeWindow() { /* no need, can just leave it on the page */ }
+
+		void dispose() { }
+
+		bool destroyed = false;
+
+		int eventLoop(long pulseTimeout) {
+			bool done = false;
+			import core.thread;
+
+			while (!done) {
+			while(!done &&
+				(pulseTimeout == 0 || socket.recvAvailable()))
+			{
+				//done = doXNextEvent(this); // FIXME: what about multiple windows? This wasn't originally going to support them but maybe I should
+			}
+				if(!done && pulseTimeout !=0) {
+					if(handlePulse !is null)
+						handlePulse();
+					Thread.sleep(dur!"msecs"(pulseTimeout));
+				}
+			}
+
+			return 0;
+		}
+	}
+
+	struct JsImpl { string code; }
+
+	struct Html5 {
+		@JsImpl(q{
+
+		})
+		static void createImage(int handle, Image i) {
+
+		}
+
+		static void freeImage(int handle) {
+
+		}
+
+		static void createCanvas(int width, int height) {
+
+		}
+	}
+}

@@ -30,7 +30,9 @@ class FacebookApiException : Exception {
 
 import arsd.curl;
 import arsd.sha;
-import std.digest.md;
+
+import std.md5;
+// import std.digest.md;
 
 import std.file;
 
@@ -38,7 +40,6 @@ import std.file;
 // note when is a d_time, so unix_timestamp * 1000
 Variant[string] postToFacebookWall(string[] info, string id, string message, string picture = null, string link = null, long when = 0, string linkDescription = null) {
 	string url = "https://graph.facebook.com/" ~ id ~ "/feed";
-
 
 	string data = "access_token=" ~ std.uri.encodeComponent(info[1]);
 	data ~= "&message=" ~ std.uri.encodeComponent(message);
@@ -224,8 +225,8 @@ OAuthParams twitter(string apiKey, string apiSecret) {
 	params.apiKey = apiKey;
 	params.apiSecret = apiSecret;
 
-	//params.baseUrl = "https://api.twitter.com";
-	params.baseUrl = "http://twitter.com";
+	params.baseUrl = "https://api.twitter.com";
+	//params.baseUrl = "http://twitter.com";
 	params.requestTokenPath = "/oauth/request_token";
 	params.authorizePath = "/oauth/authorize";
 	params.accessTokenPath = "/oauth/access_token";
@@ -254,9 +255,9 @@ OAuthParams aWeber(string apiKey, string apiSecret) {
 	params.apiSecret = apiSecret;
 
 	params.baseUrl = "https://auth.aweber.com";
-	params.requestTokenPath = "/1.0/oauth/request_token";
-	params.accessTokenPath = "/1.0/oauth/access_token";
-	params.authorizePath = "/1.0/oauth/authorize";
+	params.requestTokenPath = "/1.1/oauth/request_token";
+	params.accessTokenPath = "/1.1/oauth/access_token";
+	params.authorizePath = "/1.1/oauth/authorize";
 
 	// API Base: https://api.aweber.com/1.0/
 
@@ -273,9 +274,9 @@ string tweet(OAuthParams params, string oauthToken, string tokenSecret, string m
 		"token_secret" : tokenSecret,
 	];
 
-	auto data = encodeVariables(["status" : message]);
+	auto data = "status=" ~ rawurlencode(message);//.replace("%3F", "?");//encodeVariables(["status" : message]);
 
-	auto ret = curlOAuth(params, "http://api.twitter.com" ~ "/1/statuses/update.json", args, "POST", data);
+	auto ret = curlOAuth(params, "http://api.twitter.com" ~ "/1.1/statuses/update.json", args, "POST", data);
 
 	auto val = jsonToVariant(ret).get!(Variant[string]);
 	if("id_str" !in val)
@@ -287,7 +288,7 @@ import std.file;
 /**
 	Redirects the user to the authorize page on the provider's website.
 */
-void authorizeStepOne(Cgi cgi, OAuthParams params, string oauthCallback = null) {
+void authorizeStepOne(Cgi cgi, OAuthParams params, string oauthCallback = null, string additionalOptions = null, string[string] additionalTokenArgs = null) {
 	if(oauthCallback is null) {
 		oauthCallback = cgi.getCurrentCompleteUri();
 		if(oauthCallback.indexOf("?") == -1)
@@ -300,7 +301,13 @@ void authorizeStepOne(Cgi cgi, OAuthParams params, string oauthCallback = null) 
 	if(oauthCallback.length)
 		args["oauth_callback"] = oauthCallback;
 
-	auto ret = curlOAuth(params, params.baseUrl ~ params.requestTokenPath,
+	//foreach(k, v; additionalTokenArgs)
+		//args[k] = v;
+
+	auto moreArgs = encodeVariables(additionalTokenArgs);
+	if(moreArgs.length)
+		moreArgs = "?" ~ moreArgs;
+	auto ret = curlOAuth(params, params.baseUrl ~ params.requestTokenPath ~ moreArgs,
 	 		args, "POST", "", "");
 	auto vals = decodeVariables(ret);
 
@@ -319,7 +326,11 @@ void authorizeStepOne(Cgi cgi, OAuthParams params, string oauthCallback = null) 
 	std.file.write("/tmp/oauth-token-secret-" ~ oauth_token,
 		oauth_secret);
 
-	cgi.setResponseLocation(params.baseUrl ~ params.authorizePath ~ "?oauth_token=" ~ oauth_token);
+	// FIXME: make sure this doesn't break twitter etc
+	if("login_url" in vals) // apparently etsy does it this way...
+		cgi.setResponseLocation(vals["login_url"][0]);
+	else
+		cgi.setResponseLocation(params.baseUrl ~ params.authorizePath ~ "?" ~(additionalOptions.length ? (additionalOptions ~ "&") : "")~ "oauth_token=" ~ oauth_token);
 }
 
 /**
@@ -501,9 +512,9 @@ struct Pair {
 
 	string output(bool useQuotes = false) {
 		if(useQuotes)
-			return std.uri.encodeComponent(name) ~ "=\"" ~ std.uri.encodeComponent(value) ~ "\"";
+			return std.uri.encodeComponent(name) ~ "=\"" ~ rawurlencode(value) ~ "\"";
 		else
-			return std.uri.encodeComponent(name) ~ "=" ~ std.uri.encodeComponent(value);
+			return std.uri.encodeComponent(name) ~ "=" ~ rawurlencode(value);
 	}
 
 	int opCmp(Pair rhs) {

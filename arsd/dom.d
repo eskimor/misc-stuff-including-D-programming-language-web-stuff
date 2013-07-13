@@ -20,6 +20,10 @@
 */
 module arsd.dom;
 
+// FIXME: might be worth doing Element.attrs and taking opDispatch off that
+// so more UFCS works.
+
+
 // FIXME: something like <ol>spam <ol> with no closing </ol> should read the second tag as the closer in garbage mode
 // FIXME: failing to close a paragraph sometimes messes things up too
 
@@ -115,14 +119,14 @@ mixin template DomConvenienceFunctions() {
 			n ~= name;
 		}
 
-		className = n.strip;
+		className = n.strip();
 
 		return this;
 	}
 
 	/// Returns whether the given class appears in this element.
 	bool hasClass(string c) {
-		auto cn = className;
+		string cn = className;
 
 		auto idx = cn.indexOf(c);
 		if(idx == -1)
@@ -434,6 +438,24 @@ mixin template DomConvenienceFunctions() {
 	}
 }
 
+/// finds comments that match the given txt. Case insensitive, strips whitespace.
+Element[] findComments(Document document, string txt) {
+	return findComments(document.root, txt);
+}
+
+/// ditto
+Element[] findComments(Element element, string txt) {
+	txt = txt.strip().toLower();
+	Element[] ret;
+
+	foreach(comment; element.getElementsByTagName("#comment")) {
+		string t = comment.nodeValue().strip().toLower();
+		if(t == txt)
+			ret ~= comment;
+	}
+
+	return ret;
+}
 
 // I'm just dicking around with this
 struct ElementCollection {
@@ -585,8 +607,8 @@ struct ElementStyle {
 			if(idx == -1)
 				ret[rule] = "";
 			else {
-				auto name = rule[0 .. idx].strip;
-				auto value = rule[idx + 1 .. $].strip;
+				auto name = rule[0 .. idx].strip();
+				auto value = rule[idx + 1 .. $].strip();
 
 				ret[name] = value;
 			}
@@ -677,7 +699,7 @@ import std.range;
 /// Document implements this interface with type = text/html (see Document.contentType for more info)
 /// and data = document.toString, so you can return Documents anywhere web.d expects FileResources.
 interface FileResource {
-	string contentType() const; /// the content-type of the file. e.g. "text/html; charset=utf-8" or "image/png"
+	@property string contentType() const; /// the content-type of the file. e.g. "text/html; charset=utf-8" or "image/png"
 	immutable(ubyte)[] getData() const; /// the data
 }
 
@@ -772,7 +794,7 @@ class Element {
 			case "#text":
 				e = new TextNode(null, childInfo);
 				return e;
-			break;
+			// break;
 			case "table":
 				e = new Table(null);
 			break;
@@ -885,6 +907,8 @@ class Element {
 
 		version(dom_node_indexes)
 			this.dataset.nodeIndex = to!string(&(this.attributes));
+
+		assert(_tagName.indexOf(" ") == -1);//, "<" ~ _tagName ~ "> is invalid");
 	}
 
 	/// Convenience constructor when you don't care about the parentDocument. Note this might break things on the document.
@@ -1128,9 +1152,9 @@ class Element {
 			name = name.toLower();
 
 		// I never use this shit legitimately and neither should you
-		auto it = name.toLower;
+		auto it = name.toLower();
 		if(it == "href" || it == "src") {
-			auto v = value.strip.toLower();
+			auto v = value.strip().toLower();
 			if(v.startsWith("vbscript:"))
 				value = value[9..$];
 			if(v.startsWith("javascript:"))
@@ -1244,7 +1268,7 @@ class Element {
 	/// This sets the style attribute with a string.
 	@property ElementStyle style(string s) {
 		this.setAttribute("style", s);
-		return this.style();
+		return this.style;
 	}
 
 	private void parseAttributes(string[] whichOnes = null) {
@@ -1495,7 +1519,7 @@ class Element {
 			//assert(isInArray(child, children));
 		}
 	body {
-		foreach(i, c; children) {
+		foreach(ref i, c; children) {
 			if(c is where) {
 				i++;
 				children = children[0..i] ~ child ~ children[i..$];
@@ -1568,7 +1592,7 @@ class Element {
 		Returns a string containing all child elements, formatted such that it could be pasted into
 		an XML file.
 	*/
-	string innerHTML(Appender!string where = appender!string()) const {
+	@property string innerHTML(Appender!string where = appender!string()) const {
 		if(children is null)
 			return "";
 
@@ -1586,7 +1610,7 @@ class Element {
 	/**
 		Takes some html and replaces the element's children with the tree made from the string.
 	*/
-	Element innerHTML(string html, bool strict = false) {
+	@property Element innerHTML(string html, bool strict = false) {
 		if(html.length)
 			selfClosed = false;
 
@@ -1614,8 +1638,8 @@ class Element {
 	}
 
 	/// ditto
-	Element innerHTML(Html html) {
-		return this.innerHTML(html.source);
+	@property Element innerHTML(Html html) {
+		return this.innerHTML = html.source;
 	}
 
 	private void reparentTreeDocuments() {
@@ -1790,7 +1814,7 @@ class Element {
 		<p>cool <b>api</b> &amp; code dude<p>
 		innerText of that is "cool api & code dude".
 	*/
-	string innerText() const {
+	@property string innerText() const {
 		string s;
 		foreach(child; children) {
 			if(child.nodeType != NodeType.Text)
@@ -1805,7 +1829,7 @@ class Element {
 		Sets the inside text, replacing all children. You don't
 		have to worry about entity encoding.
 	*/
-	void innerText(string text) {
+	@property void innerText(string text) {
 		selfClosed = false;
 		Element e = new TextNode(parentDocument, text);
 		e.parentNode = this;
@@ -1823,7 +1847,7 @@ class Element {
 		Same result as innerText; the tag with all inner tags stripped out
 	*/
 	string outerText() const {
-		return innerText();
+		return innerText;
 	}
 
 
@@ -1842,7 +1866,10 @@ class Element {
 	body {
 	+/
 	{
-		auto e = new Element(parentDocument, tagName, attributes.dup, selfClosed);
+		auto e = Element.make(this.tagName);
+		e.parentDocument = this.parentDocument;
+		e.attributes = this.attributes.dup;
+		e.selfClosed = this.selfClosed;
 		foreach(child; children) {
 			e.appendChild(child.cloned);
 		}
@@ -1856,7 +1883,10 @@ class Element {
 			return this.cloned;
 
 		// shallow clone
-		auto e = new Element(parentDocument, tagName, attributes.dup, selfClosed);
+		auto e = Element.make(this.tagName);
+		e.parentDocument = this.parentDocument;
+		e.attributes = this.attributes.dup;
+		e.selfClosed = this.selfClosed;
 		return e;
 	}
 
@@ -1955,7 +1985,10 @@ class Element {
 	Element addField(string label, string name, string type = "text", FormFieldOptions fieldOptions = FormFieldOptions.none) {
 		auto fs = this;
 		auto i = fs.addChild("label");
-		i.addChild("span", label);
+
+		if(!(type == "checkbox" || type == "radio"))
+			i.addChild("span", label);
+
 		Element input;
 		if(type == "textarea")
 			input = i.addChild("textarea").
@@ -1965,6 +1998,9 @@ class Element {
 			input = i.addChild("input").
 			setAttribute("name", name).
 			setAttribute("type", type);
+
+		if(type == "checkbox" || type == "radio")
+			i.addChild("span", label);
 
 		// these are html 5 attributes; you'll have to implement fallbacks elsewhere. In Javascript or maybe I'll add a magic thing to html.d later.
 		fieldOptions.applyToElement(input);
@@ -2111,6 +2147,116 @@ dchar parseEntity(in dchar[] entity) {
 		case "amp":
 			return '&';
 		// the next are html rather than xml
+
+		case "Agrave": return '\u00C0';
+		case "Aacute": return '\u00C1';
+		case "Acirc": return '\u00C2';
+		case "Atilde": return '\u00C3';
+		case "Auml": return '\u00C4';
+		case "Aring": return '\u00C5';
+		case "AElig": return '\u00C6';
+		case "Ccedil": return '\u00C7';
+		case "Egrave": return '\u00C8';
+		case "Eacute": return '\u00C9';
+		case "Ecirc": return '\u00CA';
+		case "Euml": return '\u00CB';
+		case "Igrave": return '\u00CC';
+		case "Iacute": return '\u00CD';
+		case "Icirc": return '\u00CE';
+		case "Iuml": return '\u00CF';
+		case "ETH": return '\u00D0';
+		case "Ntilde": return '\u00D1';
+		case "Ograve": return '\u00D2';
+		case "Oacute": return '\u00D3';
+		case "Ocirc": return '\u00D4';
+		case "Otilde": return '\u00D5';
+		case "Ouml": return '\u00D6';
+		case "Oslash": return '\u00D8';
+		case "Ugrave": return '\u00D9';
+		case "Uacute": return '\u00DA';
+		case "Ucirc": return '\u00DB';
+		case "Uuml": return '\u00DC';
+		case "Yacute": return '\u00DD';
+		case "THORN": return '\u00DE';
+		case "szlig": return '\u00DF';
+		case "agrave": return '\u00E0';
+		case "aacute": return '\u00E1';
+		case "acirc": return '\u00E2';
+		case "atilde": return '\u00E3';
+		case "auml": return '\u00E4';
+		case "aring": return '\u00E5';
+		case "aelig": return '\u00E6';
+		case "ccedil": return '\u00E7';
+		case "egrave": return '\u00E8';
+		case "eacute": return '\u00E9';
+		case "ecirc": return '\u00EA';
+		case "euml": return '\u00EB';
+		case "igrave": return '\u00EC';
+		case "iacute": return '\u00ED';
+		case "icirc": return '\u00EE';
+		case "iuml": return '\u00EF';
+		case "eth": return '\u00F0';
+		case "ntilde": return '\u00F1';
+		case "ograve": return '\u00F2';
+		case "oacute": return '\u00F3';
+		case "ocirc": return '\u00F4';
+		case "otilde": return '\u00F5';
+		case "ouml": return '\u00F6';
+		case "oslash": return '\u00F8';
+		case "ugrave": return '\u00F9';
+		case "uacute": return '\u00FA';
+		case "ucirc": return '\u00FB';
+		case "uuml": return '\u00FC';
+		case "yacute": return '\u00FD';
+		case "thorn": return '\u00FE';
+		case "yuml": return '\u00FF';
+		case "nbsp": return '\u00A0';
+		case "iexcl": return '\u00A1';
+		case "cent": return '\u00A2';
+		case "pound": return '\u00A3';
+		case "curren": return '\u00A4';
+		case "yen": return '\u00A5';
+		case "brvbar": return '\u00A6';
+		case "sect": return '\u00A7';
+		case "uml": return '\u00A8';
+		case "copy": return '\u00A9';
+		case "ordf": return '\u00AA';
+		case "laquo": return '\u00AB';
+		case "not": return '\u00AC';
+		case "shy": return '\u00AD';
+		case "reg": return '\u00AE';
+		case "ldquo": return '\u201c';
+		case "rdquo": return '\u201d';
+		case "macr": return '\u00AF';
+		case "deg": return '\u00B0';
+		case "plusmn": return '\u00B1';
+		case "sup2": return '\u00B2';
+		case "sup3": return '\u00B3';
+		case "acute": return '\u00B4';
+		case "micro": return '\u00B5';
+		case "para": return '\u00B6';
+		case "middot": return '\u00B7';
+		case "cedil": return '\u00B8';
+		case "sup1": return '\u00B9';
+		case "ordm": return '\u00BA';
+		case "raquo": return '\u00BB';
+		case "frac14": return '\u00BC';
+		case "frac12": return '\u00BD';
+		case "frac34": return '\u00BE';
+		case "iquest": return '\u00BF';
+		case "times": return '\u00D7';
+		case "divide": return '\u00F7';
+		case "OElig": return '\u0152';
+		case "oelig": return '\u0153';
+		case "Scaron": return '\u0160';
+		case "scaron": return '\u0161';
+		case "Yuml": return '\u0178';
+		case "fnof": return '\u0192';
+		case "circ": return '\u02C6';
+		case "tilde": return '\u02DC';
+		case "trade": return '\u2122';
+
+
 		/*
 		case "cent":
 		case "pound":
@@ -2118,6 +2264,11 @@ dchar parseEntity(in dchar[] entity) {
 		case "deg":
 		case "micro"
 		*/
+		/*
+		case "egrave":
+			return '\u0038';
+		case "Egrave":
+			return '\u00c8';
 		case "times":
 			return '\u00d7';
 		case "hellip":
@@ -2154,6 +2305,7 @@ dchar parseEntity(in dchar[] entity) {
 			return '\u03bf';
 		case "middot":
 			return '\u00b7';
+		*/
 		// and handling numeric entities
 		default:
 			if(entity[1] == '#') {
@@ -2268,9 +2420,24 @@ string htmlEntitiesDecode(string data, bool strict = false) {
 	return cast(string) a; // assumeUnique is actually kinda slow, lol
 }
 
-///.
-class RawSource : Element {
+abstract class SpecialElement : Element {
+	this(Document _parentDocument) {
+		super(_parentDocument);
+	}
 
+	///.
+	override Element appendChild(Element e) {
+		assert(0, "Cannot append to a special node");
+	}
+
+	///.
+	@property override int nodeType() const {
+		return 100;
+	}
+}
+
+///.
+class RawSource : SpecialElement {
 	///.
 	this(Document _parentDocument, string s) {
 		super(_parentDocument);
@@ -2284,25 +2451,140 @@ class RawSource : Element {
 	}
 
 	///.
-	override int nodeType() const {
-		return 100;
-	}
-
-	///.
 	override string writeToAppender(Appender!string where = appender!string()) const {
 		where.put(source);
 		return source;
 	}
 
 	///.
-	override Element appendChild(Element e) {
-		assert(0, "Cannot append to a text node");
+	string source;
+}
+
+abstract class ServerSideCode : SpecialElement {
+	this(Document _parentDocument, string type) {
+		super(_parentDocument);
+		tagName = "#" ~ type;
 	}
 
+	///.
+	override string nodeValue() const {
+		return this.source;
+	}
+
+	///.
+	override string writeToAppender(Appender!string where = appender!string()) const {
+		auto start = where.data.length;
+		where.put("<");
+		where.put(source);
+		where.put(">");
+		return where.data[start .. $];
+	}
 
 	///.
 	string source;
 }
+
+///.
+class PhpCode : ServerSideCode {
+	///.
+	this(Document _parentDocument, string s) {
+		super(_parentDocument, "php");
+		source = s;
+	}
+}
+
+///.
+class AspCode : ServerSideCode {
+	///.
+	this(Document _parentDocument, string s) {
+		super(_parentDocument, "asp");
+		source = s;
+	}
+}
+
+///.
+class BangInstruction : SpecialElement {
+	///.
+	this(Document _parentDocument, string s) {
+		super(_parentDocument);
+		source = s;
+		tagName = "#bpi";
+	}
+
+	///.
+	override string nodeValue() const {
+		return this.source;
+	}
+
+	///.
+	override string writeToAppender(Appender!string where = appender!string()) const {
+		auto start = where.data.length;
+		where.put("<!");
+		where.put(source);
+		where.put(">");
+		return where.data[start .. $];
+	}
+
+	///.
+	string source;
+}
+
+///.
+class QuestionInstruction : SpecialElement {
+	///.
+	this(Document _parentDocument, string s) {
+		super(_parentDocument);
+		source = s;
+		tagName = "#qpi";
+	}
+
+	///.
+	override string nodeValue() const {
+		return this.source;
+	}
+
+	///.
+	override string writeToAppender(Appender!string where = appender!string()) const {
+		auto start = where.data.length;
+		where.put("<");
+		where.put(source);
+		where.put(">");
+		return where.data[start .. $];
+	}
+
+	///.
+	string source;
+}
+
+///.
+class HtmlComment : SpecialElement {
+	///.
+	this(Document _parentDocument, string s) {
+		super(_parentDocument);
+		source = s;
+		tagName = "#comment";
+	}
+
+	///.
+	override string nodeValue() const {
+		return this.source;
+	}
+
+	///.
+	override string writeToAppender(Appender!string where = appender!string()) const {
+		auto start = where.data.length;
+		where.put("<!--");
+		where.put(source);
+		where.put("-->");
+		return where.data[start .. $];
+	}
+
+	///.
+	string source;
+}
+
+
+
 
 ///.
 class TextNode : Element {
@@ -2335,7 +2617,7 @@ class TextNode : Element {
 	}
 
 	///.
-	override int nodeType() const {
+	@property override int nodeType() const {
 		return NodeType.Text;
 	}
 
@@ -3035,8 +3317,8 @@ class TableCell : Element {
 class MarkupException : Exception {
 
 	///.
-	this(string message) {
-		super(message);
+	this(string message, string file = __FILE__, size_t line = __LINE__) {
+		super(message, file, line);
 	}
 }
 
@@ -3098,14 +3380,14 @@ class Document : FileResource {
 	///
 	/// This may be called by parse() if it recognizes the data. Otherwise,
 	/// if you don't set it, it assumes text/html; charset=utf-8.
-	string contentType(string mimeType) {
+	@property string contentType(string mimeType) {
 		_contentType = mimeType;
 		return _contentType;
 	}
 
 	/// implementing the FileResource interface, useful for sending via
 	/// http automatically.
-	override string contentType() const {
+	override @property string contentType() const {
 		return _contentType;
 	}
 
@@ -3122,6 +3404,47 @@ class Document : FileResource {
 	}
 	*/
 
+	/// This will set delegates for parseSaw* (note: this overwrites anything else you set, and you setting subsequently will overwrite this) that add those things to the dom tree when it sees them.
+	/// Call this before calling parse().
+
+	/// Note this will also preserve the prolog and doctype from the original file, if there was one.
+	void enableAddingSpecialTagsToDom() {
+		parseSawComment = (string) => true;
+		parseSawAspCode = (string) => true;
+		parseSawPhpCode = (string) => true;
+		parseSawQuestionInstruction = (string) => true;
+		parseSawBangInstruction = (string) => true;
+	}
+
+	/// If the parser sees a html comment, it will call this callback
+	/// <!-- comment --> will call parseSawComment(" comment ")
+	/// Return true if you want the node appended to the document.
+	bool delegate(string) parseSawComment;
+
+	/// If the parser sees <% asp code... %>, it will call this callback.
+	/// It will be passed "% asp code... %" or "%= asp code .. %"
+	/// Return true if you want the node appended to the document.
+	bool delegate(string) parseSawAspCode;
+
+	/// If the parser sees <?php php code... ?>, it will call this callback.
+	/// It will be passed "?php php code... ?" or "?= asp code .. ?"
+	/// Note: dom.d cannot identify  the other php <? code ?> short format.
+	/// Return true if you want the node appended to the document.
+	bool delegate(string) parseSawPhpCode;
+
+	/// if it sees a <?xxx> that is not php or asp   
+	/// it calls this function with the contents.
+	/// <?SOMETHING foo> calls parseSawQuestionInstruction("?SOMETHING foo")
+	/// Unlike the php/asp ones, this ends on the first > it sees, without requiring ?>.
+	/// Return true if you want the node appended to the document.
+	bool delegate(string) parseSawQuestionInstruction;
+
+	/// if it sees a <! that is not CDATA or comment (CDATA is handled automatically and comments call parseSawComment),
+	/// it calls this function with the contents.
+	/// <!SOMETHING foo> calls parseSawBangInstruction("SOMETHING foo")
+	/// Return true if you want the node appended to the document.
+	bool delegate(string) parseSawBangInstruction;
+
 	/// Given the kind of garbage you find on the Internet, try to make sense of it.
 	/// Equivalent to document.parse(data, false, false, null);
 	/// (Case-insensitive, non-strict, determine character encoding from the data.)
@@ -3131,43 +3454,7 @@ class Document : FileResource {
 		parse(data, false, false, null);
 	}
 
-	/**
-		Take XMLish data and try to make the DOM tree out of it.
-
-		The goal isn't to be perfect, but to just be good enough to
-		approximate Javascript's behavior.
-
-		If strict, it throws on something that doesn't make sense.
-		(Examples: mismatched tags. It doesn't validate!)
-		If not strict, it tries to recover anyway, and only throws
-		when something is REALLY unworkable.
-
-		If strict is false, it uses a magic list of tags that needn't
-		be closed. If you are writing a document specifically for this,
-		try to avoid such - use self closed tags at least. Easier to parse.
-
-		The dataEncoding argument can be used to pass a specific
-		charset encoding for automatic conversion. If null (which is NOT
-		the default!), it tries to determine from the data itself,
-		using the xml prolog or meta tags, and assumes UTF-8 if unsure.
-
-		If this assumption is wrong, it can throw on non-ascii
-		characters!
-
-
-		Note that it previously assumed the data was encoded as UTF-8, which
-		is why the dataEncoding argument defaults to that.
-
-		So it shouldn't break backward compatibility.
-
-		But, if you want the best behavior on wild data - figuring it out from the document
-		instead of assuming - you'll probably want to change that argument to null.
-
-	*/
-	void parse(in string rawdata, bool caseSensitive = false, bool strict = false, string dataEncoding = "UTF-8") {
-		// FIXME: this parser could be faster; it's in the top ten biggest tree times according to the profiler
-		// of my big app.
-
+	Utf8Stream handleDataEncoding(in string rawdata, string dataEncoding, bool strict) {
 		// gotta determine the data encoding. If you know it, pass it in above to skip all this.
 		if(dataEncoding is null) {
 			dataEncoding = tryToDetermineEncoding(cast(const(ubyte[])) rawdata);
@@ -3245,10 +3532,68 @@ class Document : FileResource {
 			}
 		}
 
-		if(dataEncoding != "UTF-8")
-			data = convertToUtf8(cast(immutable(ubyte)[]) rawdata, dataEncoding);
-		else
+		if(dataEncoding != "UTF-8") {
+			if(strict)
+				data = convertToUtf8(cast(immutable(ubyte)[]) rawdata, dataEncoding);
+			else {
+				try {
+					data = convertToUtf8(cast(immutable(ubyte)[]) rawdata, dataEncoding);
+				} catch(Exception e) {
+					data = convertToUtf8(cast(immutable(ubyte)[]) rawdata, "Windows 1252");
+				}
+			}
+		} else
 			data = rawdata;
+
+		static if(is(Utf8Stream == string))
+			return data;
+		else
+			return new Utf8Stream(data);
+	}
+
+	/**
+		Take XMLish data and try to make the DOM tree out of it.
+
+		The goal isn't to be perfect, but to just be good enough to
+		approximate Javascript's behavior.
+
+		If strict, it throws on something that doesn't make sense.
+		(Examples: mismatched tags. It doesn't validate!)
+		If not strict, it tries to recover anyway, and only throws
+		when something is REALLY unworkable.
+
+		If strict is false, it uses a magic list of tags that needn't
+		be closed. If you are writing a document specifically for this,
+		try to avoid such - use self closed tags at least. Easier to parse.
+
+		The dataEncoding argument can be used to pass a specific
+		charset encoding for automatic conversion. If null (which is NOT
+		the default!), it tries to determine from the data itself,
+		using the xml prolog or meta tags, and assumes UTF-8 if unsure.
+
+		If this assumption is wrong, it can throw on non-ascii
+		characters!
+
+
+		Note that it previously assumed the data was encoded as UTF-8, which
+		is why the dataEncoding argument defaults to that.
+
+		So it shouldn't break backward compatibility.
+
+		But, if you want the best behavior on wild data - figuring it out from the document
+		instead of assuming - you'll probably want to change that argument to null.
+
+	*/
+	void parse(in string rawdata, bool caseSensitive = false, bool strict = false, string dataEncoding = "UTF-8") {
+		auto data = handleDataEncoding(rawdata, dataEncoding, strict);
+		parseStream(data, caseSensitive, strict);
+	}
+
+	// note: this work best in strict mode, unless data is just a simple string wrapper
+	void parseStream(Utf8Stream data, bool caseSensitive = false, bool strict = false) {
+		// FIXME: this parser could be faster; it's in the top ten biggest tree times according to the profiler
+		// of my big app.
+
 		assert(data !is null);
 
 		// go through character by character.
@@ -3299,7 +3644,15 @@ class Document : FileResource {
 			auto start = pos;
 			while(  data[pos] != '>' && data[pos] != '/' &&
 				data[pos] != ' ' && data[pos] != '\n' && data[pos] != '\t')
+			{
 				pos++;
+				if(pos == data.length) {
+					if(strict)
+						throw new Exception("tag name incomplete when file ended");
+					else
+						break;
+				}
+			}
 
 			if(!caseSensitive)
 				return toLower(data[start..pos]);
@@ -3314,9 +3667,19 @@ class Document : FileResource {
 			while(  data[pos] != '>' && data[pos] != '/'  && data[pos] != '=' &&
 				data[pos] != ' ' && data[pos] != '\n' && data[pos] != '\t')
 			{
-				if(data[pos] == '<')
-					throw new MarkupException("The character < can never appear in an attribute name.");
+				if(data[pos] == '<') {
+					if(strict)
+						throw new MarkupException("The character < can never appear in an attribute name. Line " ~ to!string(getLineNumber(pos)));
+					else
+						break; // e.g. <a href="something" <img src="poo" /></a>. The > should have been after the href, but some shitty files don't do that right and the browser handles it, so we will too, by pretending the > was indeed there
+				}
 				pos++;
+				if(pos == data.length) {
+					if(strict)
+						throw new Exception("unterminated attribute name");
+					else
+						break;
+				}
 			}
 
 			if(!caseSensitive)
@@ -3326,6 +3689,12 @@ class Document : FileResource {
 		}
 
 		string readAttributeValue() {
+			if(pos >= data.length) {
+				if(strict)
+					throw new Exception("no attribute value before end of file");
+				else
+					return null;
+			}
 			switch(data[pos]) {
 				case '\'':
 				case '"':
@@ -3345,7 +3714,9 @@ class Document : FileResource {
 						parseError("Attributes must be quoted");
 					// read until whitespace or terminator (/ or >)
 					auto start = pos;
-					while(data[pos] != '>' &&
+					while(
+						pos < data.length &&
+						data[pos] != '>' &&
 						// unquoted attributes might be urls, so gotta be careful with them and self-closed elements
 						!(data[pos] == '/' && pos + 1 < data.length && data[pos+1] == '>') &&
 						data[pos] != ' ' && data[pos] != '\n' && data[pos] != '\t')
@@ -3366,6 +3737,7 @@ class Document : FileResource {
 			return TextNode.fromUndecodedString(this, data[start..pos]);
 		}
 
+		// this is obsolete!
 		RawSource readCDataNode() {
 			auto start = pos;
 			while(pos < data.length && data[pos] != '<') {
@@ -3378,7 +3750,14 @@ class Document : FileResource {
 
 		struct Ele {
 			int type; // element or closing tag or nothing
-			Element element; // for type == 0
+				/*
+					type == 0 means regular node, self-closed (element is valid)
+					type == 1 means closing tag (payload is the tag name, element may be valid)
+					type == 2 means you should ignore it completely
+					type == 3 means it is a special element that should be appended, if possible, e.g. a <!DOCTYPE> that was chosen to be kept, php code, or comment. It will be appended at the current element if inside the root, and to a special document area if not
+					type == 4 means the document was totally empty
+				*/
+			Element element; // for type == 0 or type == 3
 			string payload; // for type == 1
 		}
 		// recursively read a tag
@@ -3393,7 +3772,7 @@ class Document : FileResource {
 			if(pos >= data.length)
 			{
 				if(strict) {
-					throw new MarkupException("Gone over the input (is there no root element?), chain: " ~ to!string(parentChain));
+					throw new MarkupException("Gone over the input (is there no root element or did it never close?), chain: " ~ to!string(parentChain));
 				} else {
 					if(parentChain.length)
 						return Ele(1, null, parentChain[0]); // in loose mode, we just assume the document has ended
@@ -3408,73 +3787,211 @@ class Document : FileResource {
 
 			enforce(data[pos] == '<');
 			pos++;
+			if(pos == data.length) {
+				if(strict)
+					throw new MarkupException("Found trailing < at end of file");
+				// if not strict, we'll just skip the switch
+			} else
 			switch(data[pos]) {
 				// I don't care about these, so I just want to skip them
 				case '!': // might be a comment, a doctype, or a special instruction
 					pos++;
+
 						// FIXME: we should store these in the tree too
 						// though I like having it stripped out tbh.
-					if(data[pos] == '-' && data[pos+1] == '-') {
+
+					if(pos == data.length) {
+						if(strict)
+							throw new MarkupException("<! opened at end of file");
+					} else if(data[pos] == '-' && (pos + 1 < data.length) && data[pos+1] == '-') {
 						// comment
 						pos += 2;
-						while(data[pos..pos+3] != "-->")
+
+						// FIXME: technically, a comment is anything
+						// between -- and -- inside a <!> block.
+						// so in <!-- test -- lol> , the " lol" is NOT a comment
+						// and should probably be handled differently in here, but for now
+						// I'll just keep running until --> since that's the common way
+
+						auto commentStart = pos;
+						while(pos+3 < data.length && data[pos..pos+3] != "-->")
 							pos++;
-						assert(data[pos] == '-');
-						pos++;
-						assert(data[pos] == '-');
-						pos++;
-						assert(data[pos] == '>');
-					} else if(data[pos..pos + 7] == "[CDATA[") {
+
+						auto end = commentStart;
+
+						if(pos + 3 >= data.length) {
+							if(strict)
+								throw new MarkupException("unclosed comment");
+							end = data.length;
+							pos = data.length;
+						} else {
+							end = pos;
+							assert(data[pos] == '-');
+							pos++;
+							assert(data[pos] == '-');
+							pos++;
+							assert(data[pos] == '>');
+							pos++;
+						}
+
+						if(parseSawComment !is null)
+							if(parseSawComment(data[commentStart .. end])) {
+								return Ele(3, new HtmlComment(this, data[commentStart .. end]), null);
+							}
+					} else if(pos + 7 <= data.length && data[pos..pos + 7] == "[CDATA[") {
 						pos += 7;
-						// FIXME: major malfunction possible here
+
 						auto cdataStart = pos;
 
-						// cdata isn't allowed to nest, so this should be generally ok, as long as it is found
-						auto cdataEnd = pos + data[pos .. $].indexOf("]]>");
+						ptrdiff_t end = -1;
+						typeof(end) cdataEnd;
 
-						pos = cdataEnd + 3;
+						if(pos < data.length) {
+							// cdata isn't allowed to nest, so this should be generally ok, as long as it is found
+							end = data[pos .. $].indexOf("]]>");
+						}
+
+						if(end == -1) {
+							if(strict)
+								throw new MarkupException("Unclosed CDATA section");
+							end = pos;
+							cdataEnd = pos;
+						} else {
+							cdataEnd = pos + end;
+							pos = cdataEnd + 3;
+						}
+
 						return Ele(0, new TextNode(this, data[cdataStart .. cdataEnd]), null);
-					} else
-						while(data[pos] != '>')
+					} else {
+						auto start = pos;
+						while(pos < data.length && data[pos] != '>')
 							pos++;
-					pos++; // skip the >
+
+						auto bangEnds = pos;
+						if(pos == data.length) {
+							if(strict)
+								throw new MarkupException("unclosed processing instruction (<!xxx>)");
+						} else pos++; // skipping the >
+
+						if(parseSawBangInstruction !is null)
+							if(parseSawBangInstruction(data[start .. bangEnds])) {
+								// FIXME: these should be able to modify the parser state,
+								// doing things like adding entities, somehow.
+
+								return Ele(3, new BangInstruction(this, data[start .. bangEnds]), null);
+							}
+					}
+
+					/*
+					if(pos < data.length && data[pos] == '>')
+						pos++; // skip the >
+					else
+						assert(!strict);
+					*/
 				break;
-				// case '%':
+				case '%':
 				case '?':
+					/*
+						Here's what we want to support:
+
+						<% asp code %>
+						<%= asp code %>
+						<?php php code ?>
+						<?= php code ?>
+
+						The contents don't really matter, just if it opens with
+						one of the above for, it ends on the two char terminator.
+
+						<?something>
+							this is NOT php code
+							because I've seen this in the wild: <?EM-dummyText>
+
+							This could be php with shorttags which would be cut off
+							prematurely because if(a >) - that > counts as the close
+							of the tag, but since dom.d can't tell the difference
+							between that and the <?EM> real world example, it will
+							not try to look for the ?> ending.
+
+						The difference between this and the asp/php stuff is that it
+						ends on >, not ?>. ONLY <?php or <?= ends on ?>. The rest end
+						on >.
+					*/
+
 					char end = data[pos];
-					// FIXME this is all kinda broken
+					auto started = pos;
+					bool isAsp = end == '%';
+					int currentIndex = 0;
+					bool isPhp = false;
+					bool isEqualTag = false;
+					int phpCount = 0;
 
 				    more:
 					pos++; // skip the start
+					if(pos == data.length) {
+						if(strict)
+							throw new MarkupException("Unclosed <"~end~" by end of file");
+					} else {
+						currentIndex++;
+						if(currentIndex == 1 && data[pos] == '=') {
+							if(!isAsp)
+								isPhp = true;
+							isEqualTag = true;
+							goto more;
+						}
+						if(currentIndex == 1 && data[pos] == 'p')
+							phpCount++;
+						if(currentIndex == 2 && data[pos] == 'h')
+							phpCount++;
+						if(currentIndex == 3 && data[pos] == 'p' && phpCount == 2)
+							isPhp = true;
 
-					while(data[pos] != end) {
-						// FIXME: what if it is PHP?
-						if(data[pos] == '>')
-							break; // I've seen this in the wild: <?EM-dummyText>
-						pos++;
+						if(data[pos] == '>') {
+							if((isAsp || isPhp) && data[pos - 1] != end)
+								goto more;
+							// otherwise we're done
+						} else
+							goto more;
 					}
 
-					if(data[pos] == end)
-						pos++; // skip the end
+					//writefln("%s: %s", isAsp ? "ASP" : isPhp ? "PHP" : "<? ", data[started .. pos]);
+					auto code = data[started .. pos];
 
-					// FIXME: we should actually store this somewhere
-						// though I like having it stripped out as well tbh.
-					if(data[pos] == '>')
-						pos++;
-					else
-						goto more;
+
+					assert((pos < data.length && data[pos] == '>') || (!strict && pos == data.length));
+					if(pos < data.length)
+						pos++; // get past the >
+
+					if(isAsp && parseSawAspCode !is null) {
+						if(parseSawAspCode(code)) {
+							return Ele(3, new AspCode(this, code), null);
+						}
+					} else if(isPhp && parseSawPhpCode !is null) {
+						if(parseSawPhpCode(code)) {
+							return Ele(3, new PhpCode(this, code), null);
+						}
+					} else if(!isAsp && !isPhp && parseSawQuestionInstruction !is null) {
+						if(parseSawQuestionInstruction(code)) {
+							return Ele(3, new QuestionInstruction(this, code), null);
+						}
+					}
 				break;
 				case '/': // closing an element
 					pos++; // skip the start
 					auto p = pos;
-					while(data[pos] != '>')
+					while(pos < data.length && data[pos] != '>')
 						pos++;
 					//writefln("</%s>", data[p..pos]);
+					if(pos == data.length && data[pos-1] != '>') {
+						if(strict)
+							throw new MarkupException("File ended before closing tag had a required >");
+						else
+							data ~= ">"; // just hack it in
+					}
 					pos++; // skip the '>'
 
 					string tname = data[p..pos-1];
 					if(!caseSensitive)
-						tname = tname.toLower;
+						tname = tname.toLower();
 
 				return Ele(1, null, tname); // closing tag reports itself here
 				case ' ': // assume it isn't a real element...
@@ -3527,7 +4044,7 @@ class Document : FileResource {
 							if(!selfClosed)
 								selfClosed = tagName.isInArray(selfClosedElements);
 
-							while(data[pos] != '>')
+							while(pos < data.length && data[pos] != '>')
 								pos++;
 						}
 
@@ -3549,14 +4066,29 @@ class Document : FileResource {
 						if(tagName == "script" || tagName == "style") {
 							if(!selfClosed) {
 								string closer = "</" ~ tagName ~ ">";
-								auto ending = indexOf(data[pos..$], closer);
-								if(loose && ending == -1)
-									ending = indexOf(data[pos..$], closer.toUpper);
-								if(ending == -1)
-									throw new Exception("tag " ~ tagName ~ " never closed");
-								ending += pos;
-								e.innerRawSource = data[pos..ending];
-								pos = ending + closer.length;
+								ptrdiff_t ending;
+								if(pos >= data.length)
+									ending = -1;
+								else
+									ending = indexOf(data[pos..$], closer);
+
+								if(loose && ending == -1 && pos < data.length)
+									ending = indexOf(data[pos..$], closer.toUpper());
+								if(ending == -1) {
+									if(strict)
+										throw new Exception("tag " ~ tagName ~ " never closed");
+									else {
+										// let's call it totally empty and do the rest of the file as text. doing it as html could still result in some weird stuff like if(a<4) being read as <4 being a tag so it comes out if(a<4></4> and other weirdness) It is either a closed script tag or the rest of the file is forfeit.
+										if(pos < data.length) {
+											e = new TextNode(this, data[pos .. $]);
+											pos = data.length;
+										}
+									}
+								} else {
+									ending += pos;
+									e.innerRawSource = data[pos..ending];
+									pos = ending + closer.length;
+								}
 							}
 							return Ele(0, e, null);
 						}
@@ -3582,8 +4114,13 @@ class Document : FileResource {
 
 							if(n.type == 4) return n; // the document is empty
 
-
-							if(n.type == 0) {
+							if(n.type == 3 && n.element !is null) {
+								// special node, append if possible
+								if(e !is null)
+									e.appendChild(n.element);
+								else
+									piecesBeforeRoot ~= n.element;
+							} else if(n.type == 0) {
 								if(!strict)
 									considerHtmlParagraphHack(n.element);
 								e.appendChild(n.element);
@@ -3651,6 +4188,11 @@ class Document : FileResource {
 						return Ele(0, e, null);
 					}
 
+					// if a tag was opened but not closed by end of file, we can arrive here
+					if(!strict && pos >= data.length)
+						return addTag(false);
+					//else if(strict) assert(0); // should be caught before
+
 					switch(data[pos]) {
 						default: assert(0);
 						case '/': // self closing tag
@@ -3664,6 +4206,13 @@ class Document : FileResource {
 							moreAttributes:
 							eatWhitespace();
 
+							// same deal as above the switch....
+							if(!strict && pos >= data.length)
+								return addTag(false);
+
+							if(strict && pos >= data.length)
+								throw new MarkupException("tag open, didn't find > before end of file");
+
 							switch(data[pos]) {
 								case '/': // self closing tag
 									return addTag(true);
@@ -3672,33 +4221,66 @@ class Document : FileResource {
 								default: // it is an attribute
 									string attrName = readAttributeName();
 									string attrValue = attrName;
+									if(pos >= data.length) {
+										if(strict)
+											assert(0, "this should have thrown in readAttributeName");
+										else {
+											data ~= ">";
+											goto blankValue;
+										}
+									}
 									if(data[pos] == '=') {
 										pos++;
 										attrValue = readAttributeValue();
 									}
 
+									blankValue:
+
 									if(strict && attrName in attributes)
 										throw new MarkupException("Repeated attribute: " ~ attrName);
-									attributes[attrName] = attrValue;
+
+									if(attrName.strip().length)
+										attributes[attrName] = attrValue;
+									else if(strict) throw new MarkupException("wtf, zero length attribute name");
+
+									if(!strict && pos < data.length && data[pos] == '<') {
+										// this is the broken tag that doesn't have a > at the end
+										data = data[0 .. pos] ~ ">" ~ data[pos.. $];
+										// let's insert one as a hack
+										goto case '>';
+									}
 
 									goto moreAttributes;
 							}
 					}
 			}
 
-			return Ele(2, null, null); // this is a <! or <? thing prolly.
+			return Ele(2, null, null); // this is a <! or <? thing that got ignored prolly.
 			//assert(0);
 		}
 
 		eatWhitespace();
 		Ele r;
 		do {
-			r = readElement; // there SHOULD only be one element...
+			r = readElement(); // there SHOULD only be one element...
+
+			if(r.type == 3 && r.element !is null)
+				piecesBeforeRoot ~= r.element;
+
 			if(r.type == 4)
 				break; // the document is completely empty...
-		} while (r.type != 0 || r.element.nodeType != 1); // we look past the xml prologue and doctype
+		} while (r.type != 0 || r.element.nodeType != 1); // we look past the xml prologue and doctype; root only begins on a regular node
 
 		root = r.element;
+
+		if(!strict) // in strict mode, we'll just ignore stuff after the xml
+		while(r.type != 4) {
+			r = readElement();
+			if(r.type != 4 && r.type != 2) { // if not empty and not ignored
+				if(r.element !is null)
+					piecesAfterRoot ~= r.element;
+			}
+		}
 
 		if(root is null)
 		{
@@ -3722,7 +4304,7 @@ class Document : FileResource {
 				if(ele.tagName == "p" && ele.parentNode.tagName == ele.tagName) {
 					auto shouldBePreviousSibling = ele.parentNode;
 					auto holder = shouldBePreviousSibling.parentNode; // this is the two element's mutual holder...
-					holder.insertAfter(shouldBePreviousSibling, ele.removeFromTree);
+					holder.insertAfter(shouldBePreviousSibling, ele.removeFromTree());
 					iterator.currentKilled(); // the current branch can be skipped; we'll hit it soon anyway since it's now next up.
 				}
 			}
@@ -3911,11 +4493,26 @@ class Document : FileResource {
 
 	///.
 	void setProlog(string d) {
-		prolog = d;
+		_prolog = d;
+		prologWasSet = true;
 	}
 
 	///.
-	string prolog = "<!DOCTYPE html>\n";
+	private string _prolog = "<!DOCTYPE html>\n";
+	private bool prologWasSet = false; // set to true if the user changed it
+
+	@property string prolog() const {
+		// if the user explicitly changed it, do what they want
+		// or if we didn't keep/find stuff from the document itself,
+		// we'll use the builtin one as a default.
+		if(prologWasSet || piecesBeforeRoot.length == 0)
+			return _prolog;
+
+		string p;
+		foreach(e; piecesBeforeRoot)
+			p ~= e.toString() ~ "\n";
+		return p;
+	}
 
 	///.
 	override string toString() const {
@@ -3924,6 +4521,12 @@ class Document : FileResource {
 
 	///.
 	Element root;
+
+	/// if these were kept, this is stuff that appeared before the root element, such as <?xml version ?> decls and <!DOCTYPE>s
+	Element[] piecesBeforeRoot;
+
+	/// stuff after the root, only stored in non-strict mode and not used in toString, but available in case you want it
+	Element[] piecesAfterRoot;
 
 	///.
 	bool loose;
@@ -3945,7 +4548,7 @@ class Document : FileResource {
 class XmlDocument : Document {
 	this(string data) {
 		contentType = "text/xml; charset=utf-8";
-		prolog = `<?xml version="1.0" encoding="UTF-8"?>` ~ "\n";
+		_prolog = `<?xml version="1.0" encoding="UTF-8"?>` ~ "\n";
 
 		parse(data, true, true);
 	}
@@ -3979,7 +4582,7 @@ struct DomMutationEvent {
 }
 
 
-private static string[] selfClosedElements = [
+private enum static string[] selfClosedElements = [
 	// html 4
 	"img", "hr", "input", "br", "col", "link", "meta",
 	// html 5
@@ -4060,7 +4663,7 @@ int intFromHex(string hex) {
 		bool skip = false;
 		// get rid of useless, non-syntax whitespace
 
-		selector = selector.strip;
+		selector = selector.strip();
 		selector = selector.replace("\n", " "); // FIXME hack
 
 		selector = selector.replace(" >", ">");
@@ -4628,7 +5231,7 @@ int intFromHex(string hex) {
 			}
 		}
 
-		commit;
+		commit();
 
 		return s;
 	}
@@ -4657,8 +5260,8 @@ Element[] removeDuplicates(Element[] input) {
 class CssStyle {
 	///.
 	this(string rule, string content) {
-		rule = rule.strip;
-		content = content.strip;
+		rule = rule.strip();
+		content = content.strip();
 
 		if(content.length == 0)
 			return;
@@ -4667,7 +5270,7 @@ class CssStyle {
 		originatingSpecificity = getSpecificityOfRule(rule); // FIXME: if there's commas, this won't actually work!
 
 		foreach(part; content.split(";")) {
-			part = part.strip;
+			part = part.strip();
 			if(part.length == 0)
 				continue;
 			auto idx = part.indexOf(":");
@@ -4677,8 +5280,8 @@ class CssStyle {
 
 			Property p;
 
-			p.name = part[0 .. idx].strip;
-			p.value = part[idx + 1 .. $].replace("! important", "!important").replace("!important", "").strip; // FIXME don't drop important
+			p.name = part[0 .. idx].strip();
+			p.value = part[idx + 1 .. $].replace("! important", "!important").replace("!important", "").strip(); // FIXME don't drop important
 			p.givenExplicitly = true;
 			p.specificity = originatingSpecificity;
 
@@ -4751,7 +5354,7 @@ class CssStyle {
 		value = value.replace("! important", "!important");
 		if(value.indexOf("!important") != -1) {
 			newSpecificity.important = 1; // FIXME
-			value = value.replace("!important", "").strip;
+			value = value.replace("!important", "").strip();
 		}
 
 		foreach(ref property; properties)
@@ -4976,16 +5579,18 @@ class StyleSheet {
 final class Stack(T) {
 	this() {
 		internalLength = 0;
-		arr = initialBuffer;
+		arr = initialBuffer[];
 	}
 
 	///.
 	void push(T t) {
 		if(internalLength >= arr.length) {
+			auto oldarr = arr;
 			if(arr.length < 4096)
 				arr = new T[arr.length * 2];
 			else
 				arr = new T[arr.length + 4096];
+			arr[0 .. oldarr.length] = oldarr[];
 		}
 
 		arr[internalLength] = t;
@@ -5006,7 +5611,7 @@ final class Stack(T) {
 	}
 
 	///.
-	bool empty() {
+	@property bool empty() {
 		return internalLength ? false : true;
 	}
 
@@ -5206,7 +5811,7 @@ class Event {
 
 		isBubbling = false;
 
-		foreach(e; chain.retro) {
+		foreach(e; chain.retro()) {
 			if(eventName in e.capturingEventHandlers)
 			foreach(handler; e.capturingEventHandlers[eventName])
 				handler(e, this);
@@ -5252,7 +5857,7 @@ struct FormFieldOptions {
 
 
 	// convenience methods to quickly get some options
-	static FormFieldOptions none() {
+	@property static FormFieldOptions none() {
 		FormFieldOptions f;
 		return f;
 	}
@@ -5292,12 +5897,108 @@ struct FormFieldOptions {
 	}
 }
 
+// this needs to look just like a string, but can expand as needed
+version(no_dom_stream)
+alias string Utf8Stream;
+else
+class Utf8Stream {
+	protected:
+		// these two should be overridden in subclasses to actually do the stream magic
+		string getMore() {
+			if(getMoreHelper !is null)
+				return getMoreHelper();
+			return null;
+		}
+
+		bool hasMore() {
+			if(hasMoreHelper !is null)
+				return hasMoreHelper();
+			return false;
+		}
+		// the rest should be ok
+
+	public:
+		this(string d) {
+			this.data = d;
+		}
+
+		this(string delegate() getMoreHelper, bool delegate() hasMoreHelper) {
+			this.getMoreHelper = getMoreHelper;
+			this.hasMoreHelper = hasMoreHelper;
+
+			if(hasMore())
+				this.data ~= getMore();
+
+			stdout.flush();
+		}
+
+		@property final size_t length() {
+			// the parser checks length primarily directly before accessing the next character
+			// so this is the place we'll hook to append more if possible and needed.
+			if(lastIdx + 1 >= data.length && hasMore()) {
+				data ~= getMore();
+			}
+			return data.length;
+		}
+
+		final char opIndex(size_t idx) {
+			if(idx > lastIdx)
+				lastIdx = idx;
+			return data[idx];
+		}
+
+		final string opSlice(size_t start, size_t end) {
+			if(end > lastIdx)
+				lastIdx = end;
+			return data[start .. end];
+		}
+
+		final size_t opDollar() {
+			return length();
+		}
+
+		final Utf8Stream opBinary(string op : "~")(string s) {
+			this.data ~= s;
+			return this;
+		}
+
+		final Utf8Stream opOpAssign(string op : "~")(string s) {
+			this.data ~= s;
+			return this;
+		}
+
+		final Utf8Stream opAssign(string rhs) {
+			this.data = rhs;
+			return this;
+		}
+	private:
+		string data;
+
+		size_t lastIdx;
+
+		bool delegate() hasMoreHelper;
+		string delegate() getMoreHelper;
+
+
+		/+
+		// used to maybe clear some old stuff
+		// you might have to remove elements parsed with it too since they can hold slices into the
+		// old stuff, preventing gc
+		void dropFront(int bytes) {
+			posAdjustment += bytes;
+			data = data[bytes .. $];
+		}
+
+		int posAdjustment;
+		+/
+}
+
 /*
-Copyright: Adam D. Ruppe, 2010 - 2012
+Copyright: Adam D. Ruppe, 2010 - 2013
 License:   <a href="http://www.boost.org/LICENSE_1_0.txt">Boost License 1.0</a>.
 Authors: Adam D. Ruppe, with contributions by Nick Sabalausky and Trass3r
 
-        Copyright Adam D. Ruppe 2010-2012.
+        Copyright Adam D. Ruppe 2010-2013.
 Distributed under the Boost Software License, Version 1.0.
    (See accompanying file LICENSE_1_0.txt or copy at
         http://www.boost.org/LICENSE_1_0.txt)

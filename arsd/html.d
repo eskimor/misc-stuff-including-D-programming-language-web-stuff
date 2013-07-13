@@ -29,6 +29,7 @@ enum HtmlFeatures : uint {
 	objects = 64, 	/// The <object> tag, which can link to many things, including Flash.
 	iframes = 128, 	/// The <iframe> tag. sandbox and restrict attributes are always added.
 	classes = 256, 	/// The class="" attribute
+	forms = 512, 	/// HTML forms
 }
 
 /// The things to allow in links, images, css, and aother urls.
@@ -53,7 +54,9 @@ string[] htmlTagWhitelist = [
 	"h1", "h2", "h3", "h4", "h5", "h6",
 	"abbr",
 
-	"img", "object", "audio", "video", "a", "source" // note that these usually *are* stripped out - see HtmlFeatures-  but this lets them get into stage 2
+	"img", "object", "audio", "video", "a", "source", // note that these usually *are* stripped out - see HtmlFeatures-  but this lets them get into stage 2
+
+	"form", "input", "textarea", "legend", "fieldset", "label", // ditto, but with HtmlFeatures.forms
 	// style isn't here
 ];
 
@@ -69,8 +72,9 @@ string[] htmlAttributeWhitelist = [
 	"colspan", "rowspan",
 	"title", "alt", "class",
 
-	"href", "src", "type",
+	"href", "src", "type", "name",
 	"id",
+	"method", "enctype", "value", "type", // for forms only FIXME
 
 	"align", "valign", "width", "height",
 ];
@@ -114,6 +118,15 @@ Element sanitizedHtml(/*in*/ Element userContent, string idPrefix = null, HtmlFe
 		  ||(!(allow & HtmlFeatures.audio) && e.tagName == "audio")
 		  ||(!(allow & HtmlFeatures.objects) && e.tagName == "object")
 		  ||(!(allow & HtmlFeatures.iframes) && e.tagName == "iframe")
+		  ||(!(allow & HtmlFeatures.forms) && (
+		  	e.tagName == "form" ||
+		  	e.tagName == "input" ||
+		  	e.tagName == "textarea" ||
+		  	e.tagName == "label" ||
+		  	e.tagName == "fieldset" ||
+		  	e.tagName == "legend" ||
+			1
+			))
 		) {
 			e.innerText = e.innerText; // strips out non-text children
 			e.stripOut;
@@ -139,8 +152,8 @@ Element sanitizedHtml(/*in*/ Element userContent, string idPrefix = null, HtmlFe
 				// this space is intentionally left blank
 			} else {
 				// it's allowed but let's make sure it's completely valid
-				if(!(allow & HtmlFeatures.classes)) {
-					// don't allow the class attribute
+				if(k == "class" && (allow & HtmlFeatures.classes)) {
+					e.setAttribute("class", v);
 				} else if(k == "id") {
 					if(idPrefix !is null)
 						e.setAttribute(k, idPrefix ~ v);
@@ -149,9 +162,9 @@ Element sanitizedHtml(/*in*/ Element userContent, string idPrefix = null, HtmlFe
 					if(allow & HtmlFeatures.css) {
 						e.setAttribute(k, sanitizeCss(v));
 					}
-				} else if(k == "href" || k == "src")
+				} else if(k == "href" || k == "src") {
 					e.setAttribute(k, sanitizeUrl(v));
-				else
+				} else
 					e.setAttribute(k, v); // allowed attribute
 			}
 		}
@@ -179,7 +192,7 @@ string sanitizeCss(string css) {
 
 string sanitizeUrl(string url) {
 	// FIXME: support other options; this is more restrictive than it has to be
-	if(url.startsWith("http://") || url.startsWith("https://"))
+	if(url.startsWith("http://") || url.startsWith("https://") || url.startsWith("//"))
 		return url;
 	return null;
 }

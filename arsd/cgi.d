@@ -1,4 +1,8 @@
 // FIXME: if an exception is thrown, we shouldn't necessarily cache...
+
+// FIXME: to do: add openssl optionally
+// make sure embedded_httpd doesn't send two answers if one writes() then dies
+
 /++
 	Provides a uniform server-side API for CGI, FastCGI, SCGI, and HTTP web applications.
 
@@ -52,6 +56,20 @@
 	If you are looking to access a web application via HTTP, try curl.d.
 +/
 module arsd.cgi;
+
+version(embedded_httpd) {
+	version(Posix)
+		version=embedded_httpd_processes;
+	else
+		version=embedded_httpd_threads;
+
+	/*
+	version(with_openssl) {
+		pragma(lib, "crypto");
+		pragma(lib, "ssl");
+	}
+	*/
+}
 
 enum long defaultMaxContentLength = 5_000_000;
 
@@ -312,6 +330,9 @@ class Cgi {
 					case "userpass":
 						authorization = "Basic " ~ Base64.encode(cast(immutable(ubyte)[]) (arg)).idup;
 					break;
+					case "origin":
+						origin = arg;
+					break;
 					case "accept":
 						accept = arg;
 					break;
@@ -477,7 +498,8 @@ class Cgi {
 		//if(authorization.length == 0) // if the std is there, use it
 		//	authorization = getenv("HTTP_X_AUTHORIZATION");
 
-		if(getenv("SERVER_PORT").length)
+		// the REDIRECT_HTTPS check is here because with an Apache hack, the port can become wrong
+		if(getenv("SERVER_PORT").length && getenv("REDIRECT_HTTPS") != "on")
 			port = to!int(getenv("SERVER_PORT"));
 		else
 			port = 0; // this was probably called from the command line
@@ -492,6 +514,9 @@ class Cgi {
 		auto ka = getenv("HTTP_CONNECTION");
 		if(ka.length && ka.toLower().indexOf("keep-alive") != -1)
 			keepAliveRequested = true;
+
+		auto or = getenv("HTTP_ORIGIN");
+			origin = or;
 
 		auto rm = getenv("REQUEST_METHOD");
 		if(rm.length)
@@ -1088,6 +1113,7 @@ class Cgi {
 		// this pointer tells if the connection is supposed to be closed after we handle this
 		bool* closeConnection = null)
 	{
+		idlol = inputData;
 
 		isCalledWithCommandLineArguments = false;
 
@@ -1137,6 +1163,7 @@ class Cgi {
 				auto question = requestUri.indexOf("?");
 				if(question == -1) {
 					queryString = "";
+					// FIXME: double check, this might be wrong since it could be url encoded
 					pathInfo = requestUri[pathInfoStarts..$];
 				} else {
 					queryString = requestUri[question+1..$];
@@ -1166,6 +1193,9 @@ class Cgi {
 				switch(name) {
 					case "accept":
 						accept = value;
+					break;
+					case "origin":
+						origin = value;
 					break;
 					case "connection":
 						if(value == "close" && closeConnection)
@@ -1250,6 +1280,7 @@ class Cgi {
 			cleanUpPostDataState();
 		}
 	}
+	BufferedInputRange idlol;
 
 	private immutable(string[string]) keepLastOf(in string[][string] arr) {
 		string[string] ca;
@@ -1360,7 +1391,7 @@ class Cgi {
 		return format("http%s://%s%s%s",
 			https ? "s" : "",
 			host,
-			port == defaultPort ? "" : ":" ~ to!string(port),
+			(!port || port == defaultPort) ? "" : ":" ~ to!string(port),
 			requestUri);
 	}
 
@@ -1485,6 +1516,7 @@ class Cgi {
 	}
 
 	private string[] customHeaders;
+	private bool websocketMode;
 
 	void flushHeaders(const(void)[] t, bool isAll = false) {
 		string[] hd;
@@ -1503,6 +1535,10 @@ class Cgi {
 			else
 				hd ~= "HTTP/1.1 200 OK";
 		}
+
+		if(websocketMode)
+			goto websocket;
+
 		if(nph) { // we're responsible for setting the date too according to http 1.1
 			hd ~= "Date: " ~ printDate(cast(DateTime) Clock.currTime);
 		}
@@ -1543,8 +1579,6 @@ class Cgi {
 			hd ~= "Content-Encoding: gzip";
 		}
 
-		if(customHeaders !is null)
-			hd ~= customHeaders;
 
 		if(!isAll) {
 			if(nph && !http10) {
@@ -1557,6 +1591,10 @@ class Cgi {
 				hd ~= "Connection: Keep-Alive";
 			}
 		}
+
+		websocket:
+		if(customHeaders !is null)
+			hd ~= customHeaders;
 
 		// FIXME: what about duplicated headers?
 
@@ -1602,7 +1640,15 @@ class Cgi {
 			if(!autoBuffer || isAll) {
 				if(rawDataOutput !is null)
 					if(nph && responseChunked) {
-						rawDataOutput(makeChunk(cast(const(ubyte)[]) t));
+						//rawDataOutput(makeChunk(cast(const(ubyte)[]) t));
+						// we're making the chunk here instead of in a function
+						// to avoid unneeded gc pressure
+						rawDataOutput(cast(const(ubyte)[]) toHex(t.length));
+						rawDataOutput(cast(const(ubyte)[]) "\r\n");
+						rawDataOutput(cast(const(ubyte)[]) t);
+						rawDataOutput(cast(const(ubyte)[]) "\r\n");
+
+
 					} else {
 						rawDataOutput(cast(const(ubyte)[]) t);
 					}
@@ -1751,6 +1797,7 @@ class Cgi {
 	immutable(string[string]) requestHeaders; /// All the raw headers in the request as name/value pairs. The name is stored as all lower case, but otherwise the same as it is in HTTP; words separated by dashes. For example, "cookie" or "accept-encoding". Many HTTP headers have specialized variables below for more convenience and static name checking; you should generally try to use them.
 
 	immutable(char[]) host; 	/// The hostname in the request. If one program serves multiple domains, you can use this to differentiate between them.
+	immutable(char[]) origin; 	/// The origin header in the request, if present. Some HTML5 cross-domain apis set this and you should check it on those cross domain requests and websockets.
 	immutable(char[]) userAgent; 	/// The browser's user-agent string. Can be used to identify the browser.
 	immutable(char[]) pathInfo; 	/// This is any stuff sent after your program's name on the url, but before the query string. For example, suppose your program is named "app". If the user goes to site.com/app, pathInfo is empty. But, he can also go to site.com/app/some/sub/path; treating your program like a virtual folder. In this case, pathInfo == "/some/sub/path".
 	immutable(char[]) scriptName;   /// The full base path of your program, as seen by the user. If your program is located at site.com/programs/apps, scriptName == "/programs/apps".
@@ -1793,6 +1840,14 @@ class Cgi {
 	immutable(string[][string]) postArray; /// ditto for post
 	immutable(string[][string]) cookiesArray; /// ditto for cookies
 
+	// convenience function for appending to a uri without extra ?
+	// matches the name and effect of javascript's location.search property
+	string search() const {
+		if(queryString.length)
+			return "?" ~ queryString;
+		return "";
+	}
+
 	// FIXME: what about multiple files with the same name?
   private:
 	//RequestMethod _requestMethod;
@@ -1827,6 +1882,7 @@ string makeDataUrl(string mimeType, in void[] data) {
 	return "data:" ~ mimeType ~ ";base64," ~ assumeUnique(data64);
 }
 
+// FIXME: I don't think this class correctly decodes/encodes the individual parts
 /// Represents a url that can be broken down or built up through properties
 struct Uri {
 	alias toString this; // blargh idk a url really is a string, but should it be implicit?
@@ -1997,6 +2053,14 @@ struct Uri {
 
 		// FIXME: add something for port too
 	}
+
+	// these are like javascript's location.search and location.hash
+	string search() const {
+		return query.length ? ("?" ~ query) : "";
+	}
+	string hash() const {
+		return fragment.length ? ("#" ~ fragment) : "";
+	}
 }
 
 
@@ -2066,14 +2130,39 @@ string encodeVariables(in string[][string] data) {
 	return ret;
 }
 
+/// Encodes all but the explicitly unreserved characters per rfc 3986
+/// Alphanumeric and -_.~ are the only ones left unencoded
+/// name is borrowed from php
+string rawurlencode(in char[] data) {
+	string ret;
+	ret.reserve(data.length * 2);
+	foreach(char c; data) {
+		if(
+			(c >= 'a' && c <= 'z') ||
+			(c >= 'A' && c <= 'Z') ||
+			(c >= '0' && c <= '9') ||
+			c == '-' || c == '_' || c == '.' || c == '~')
+		{
+			ret ~= c;
+		} else {
+			ret ~= '%';
+			// since we iterate on char, this should give us the octets of the full utf8 string
+			ret ~= toHexUpper(c);
+		}
+	}
+
+	return ret;
+}
+
 
 // http helper functions
 
 // for chunked responses (which embedded http does whenever possible)
+version(none) // this is moved up above to avoid making a copy of the data
 const(ubyte)[] makeChunk(const(ubyte)[] data) {
 	const(ubyte)[] ret;
 
-	ret = cast(const(ubyte)[]) toHex(cast(int) data.length);
+	ret = cast(const(ubyte)[]) toHex(data.length);
 	ret ~= cast(const(ubyte)[]) "\r\n";
 	ret ~= data;
 	ret ~= cast(const(ubyte)[]) "\r\n";
@@ -2081,7 +2170,7 @@ const(ubyte)[] makeChunk(const(ubyte)[] data) {
 	return ret;
 }
 
-string toHex(int num) {
+string toHex(long num) {
 	string ret;
 	while(num) {
 		int v = num % 16;
@@ -2092,6 +2181,22 @@ string toHex(int num) {
 
 	return to!string(array(ret.retro));
 }
+
+string toHexUpper(long num) {
+	string ret;
+	while(num) {
+		int v = num % 16;
+		num /= 16;
+		char d = cast(char) ((v < 10) ? v + '0' : (v-10) + 'A');
+		ret ~= d;
+	}
+
+	if(ret.length == 1)
+		ret ~= "0"; // url encoding requires two digits and that's what this function is used for...
+
+	return to!string(array(ret.retro));
+}
+
 
 // the generic mixins
 
@@ -2191,7 +2296,110 @@ mixin template CustomCgiMain(CustomCgi, alias fun, long maxContentLength = defau
 			serveHttp!CustomCgi(&fun, listeningPort(8080));//5005);
 			return;
 		} else
-		version(embedded_httpd) {
+		version(embedded_httpd_processes) {
+			import core.sys.posix.unistd;
+			//import core.sys.posix.sys.socket;
+			import std.c.linux.socket;
+
+			int sock = socket(AF_INET, SOCK_STREAM, 0);
+			if(sock == -1)
+				throw new Exception("socket");
+
+			{
+				sockaddr_in addr;
+				addr.sin_family = AF_INET;
+				addr.sin_port = htons(listeningPort(8085));
+				addr.sin_addr.s_addr = INADDR_ANY;
+
+				// HACKISH
+				int on = 1;
+				setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &on, on.sizeof);
+				// end hack
+
+				
+				if(bind(sock, cast(sockaddr*) &addr, addr.sizeof) == -1) {
+					close(sock);
+					throw new Exception("bind");
+				}
+
+				if(sock.listen(16) == -1) {
+					close(sock);
+					throw new Exception("listen");
+				}
+			}
+
+
+			int processCount;
+			pid_t newPid;
+			reopen:
+			while(processCount < 8) {
+				newPid = fork();
+				if(newPid == 0) {
+					// start serving on the socket
+					for(;;) {
+						bool closeConnection;
+						uint i;
+						sockaddr addr;
+						i = addr.sizeof;
+						int s = accept(sock, &addr, &i);
+
+						if(s == -1)
+							throw new Exception("accept");
+						auto ir = new BufferedInputRange(s);
+
+						while(!ir.empty) {
+							Cgi cgi;
+							try {
+								cgi = new CustomCgi(ir, &closeConnection);
+							} catch(Throwable t) {
+								// a construction error is either bad code or bad request; bad request is what it should be since this is bug free :P
+								// anyway let's kill the connection
+								stderr.writeln(t.toString());
+								sendAll(ir.source, plainHttpError(false, "400 Bad Request", t));
+								closeConnection = true;
+								break;
+							}
+							assert(cgi !is null);
+							scope(exit)
+								cgi.dispose();
+
+							try {
+								fun(cgi);
+								cgi.close();
+							} catch(Throwable t) {
+								// a processing error can be recovered from
+								stderr.writeln(t.toString);
+								if(!handleException(cgi, t))
+									closeConnection = true;
+							}
+
+							if(closeConnection) {
+								ir.source.close();
+								break;
+							} else {
+								if(!ir.empty)
+									ir.popFront(); // get the next
+							}
+						}
+					}
+				} else {
+					processCount++;
+				}
+			}
+
+			// the parent should wait for its children...
+			if(newPid) {
+				import core.sys.posix.sys.wait;
+				int status;
+				// FIXME: maybe we should respawn if one dies unexpectedly
+				while(-1 != wait(&status)) {
+					processCount--;
+					goto reopen;
+				}
+				close(sock);
+			}
+		} else
+		version(embedded_httpd_threads) {
 			auto manager = new ListeningConnectionManager(listeningPort(8085));
 			foreach(connection; manager) {
 				scope(failure) {
@@ -2533,6 +2741,11 @@ import std.socket;
 // it is a class primarily for reference semantics
 // I might change this interface
 class BufferedInputRange {
+	version(Posix)
+	this(int source, ubyte[] buffer = null) {
+		this(new Socket(cast(socket_t) source, AddressFamily.INET), buffer);
+	}
+
 	this(Socket source, ubyte[] buffer = null) {
 		this.source = source;
 		if(buffer is null) {
@@ -2670,11 +2883,45 @@ class ListeningConnectionManager {
 		running = true;
 		shared(int) loopBroken;
 
+		version(cgi_multiple_connections_per_thread) {
+			ConnectionThread[16] pool;
+			foreach(ref t; pool) {
+				t = new ConnectionThread(null, &loopBroken, dg);
+				t.start();
+			}
+		}
+
+
 		while(!loopBroken && running) {
 			auto sn = listener.accept();
 			try {
-				auto thread = new ConnectionThread(sn, &loopBroken, dg);
-				thread.start();
+				version(cgi_no_threads) {
+					// NEVER USE THIS
+					// it exists only for debugging and other special occasions
+
+					// the thread mode is faster and less likely to stall the whole
+					// thing when a request is slow
+					dg(sn);
+				} else {
+					/*
+					version(cgi_multiple_connections_per_thread) {
+						bool foundOne = false;
+						tryAgain:
+						foreach(t; pool)
+							if(t.s is null) {
+								t.s = sn;
+								foundOne = true;
+								break;
+							}
+						Thread.sleep(dur!"msecs"(1));
+						if(!foundOne)
+							goto tryAgain;
+					} else {
+					*/
+						auto thread = new ConnectionThread(sn, &loopBroken, dg);
+						thread.start();
+					//}
+				}
 				// loopBroken = dg(sn);
 			} catch(Exception e) {
 				// if a connection goes wrong, we want to just say no, but try to carry on unless it is an Error of some sort (in which case, we'll die. You might want an external helper program to revive the server when it dies)
@@ -2707,7 +2954,21 @@ class ConnectionThread : Thread {
 		this.s = s;
 	 	this.breakSignifier = breakSignifier;
 		this.dg = dg;
-		super(&run);
+		super(&runAll);
+	}
+
+	void runAll() {
+		if(s !is null)
+			run();
+		/*
+		version(cgi_multiple_connections_per_thread) {
+			while(1) {
+				while(s is null)
+					sleep(dur!"msecs"(1));
+				run();
+			}
+		}
+		*/
 	}
 
 	void run() {
@@ -2716,6 +2977,7 @@ class ConnectionThread : Thread {
 			// might be fragile, but meh
 			if(s.handle() != socket_t.init)
 				s.close();
+			s = null; // so we know this thread is clear
 		}
 		if(auto result = dg(s)) {
 			*breakSignifier = result;
@@ -2935,13 +3197,334 @@ ByChunkRange byChunk(BufferedInputRange ir, size_t atMost) {
 	};
 }
 
+version(cgi_with_websocket) {
+	// http://tools.ietf.org/html/rfc6455
+
+	/**
+		WEBSOCKET SUPPORT:
+
+		Full example:
+			import arsd.cgi;
+
+			void websocketEcho(Cgi cgi) {
+				if(cgi.websocketRequested()) {
+					if(cgi.origin != "http://arsdnet.net")
+						throw new Exception("bad origin");
+					auto websocket = cgi.acceptWebsocket();
+
+					websocket.send("hello");
+					websocket.send(" world!");
+
+					auto msg = websocket.recv();
+					while(msg.opcode != WebSocketOpcode.close) {
+						if(msg.opcode == WebSocketOpcode.text) {
+							websocket.send(msg.textData);
+						} else if(msg.opcode == WebSocketOpcode.binary) {
+							websocket.send(msg.data);
+						}
+
+						msg = websocket.recv();
+					}
+
+					websocket.close();
+				} else assert(0, "i want a web socket!");
+			}
+
+			mixin GenericMain!websocketEcho;
+	*/
+
+	class WebSocket {
+		Cgi cgi;
+
+		private this(Cgi cgi) {
+			this.cgi = cgi;
+		}
+
+		// returns true if data available, false if it timed out
+		bool recvAvailable(Duration timeout = dur!"msecs"(0)) {
+			Socket socket = cgi.idlol.source;
+
+			auto check = new SocketSet();
+			check.add(socket);
+
+			auto got = Socket.select(check, null, null, timeout);
+			if(got > 0)
+				return true;
+			return false;
+		}
+
+		// note: this blocks
+		WebSocketMessage recv() {
+			// FIXME: should we automatically handle pings and pongs?
+			assert(!cgi.idlol.empty());
+			cgi.idlol.popFront(0);
+
+			WebSocketMessage message;
+
+			auto info = cgi.idlol.front();
+
+			// FIXME: read should prolly take the whole range so it can request more if needed
+			// read should also go ahead and consume the range
+			message = WebSocketMessage.read(info);
+
+			cgi.idlol.consume(info.length);
+
+			return message;
+		}
+
+		void send(in char[] text) {
+			// I cast away const here because I know this msg is private and it doesn't write
+			// to that buffer unless masking is set... which it isn't, so we're ok.
+			auto msg = WebSocketMessage.simpleMessage(WebSocketOpcode.text, cast(void[]) text);
+			msg.send(cgi);
+		}
+
+		void send(in ubyte[] binary) {
+			// I cast away const here because I know this msg is private and it doesn't write
+			// to that buffer unless masking is set... which it isn't, so we're ok.
+			auto msg = WebSocketMessage.simpleMessage(WebSocketOpcode.binary, cast(void[]) binary);
+			msg.send(cgi);
+		}
+
+		void close() {
+			auto msg = WebSocketMessage.simpleMessage(WebSocketOpcode.close, null);
+			msg.send(cgi);
+		}
+
+		void ping() {
+			auto msg = WebSocketMessage.simpleMessage(WebSocketOpcode.ping, null);
+			msg.send(cgi);
+		}
+
+		void pong() {
+			auto msg = WebSocketMessage.simpleMessage(WebSocketOpcode.pong, null);
+			msg.send(cgi);
+		}
+	}
+
+	bool websocketRequested(Cgi cgi) {
+		return
+			"sec-websocket-key" in cgi.requestHeaders
+			&&
+			"connection" in cgi.requestHeaders &&
+				cgi.requestHeaders["connection"].toLower().indexOf("upgrade") != -1
+			&&
+			"upgrade" in cgi.requestHeaders &&
+				cgi.requestHeaders["upgrade"].toLower() == "websocket"
+			;
+	}
+
+	WebSocket acceptWebsocket(Cgi cgi) {
+		assert(!cgi.closed);
+		assert(!cgi.outputtedResponseData);
+		cgi.setResponseStatus("101 Web Socket Protocol Handshake");
+		cgi.header("Upgrade: WebSocket");
+		cgi.header("Connection: upgrade");
+
+		string key = cgi.requestHeaders["sec-websocket-key"];
+		key ~= "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+
+		import arsd.sha;
+		auto accept = Base64.encode(SHA1(key));
+
+		cgi.header(("Sec-WebSocket-Accept: " ~ accept).idup);
+
+		cgi.websocketMode = true;
+		cgi.write("");
+
+		return new WebSocket(cgi);
+	}
+
+	// FIXME: implement websocket extension frames
+	// get websocket to work on other modes, not just embedded_httpd
+
+	enum WebSocketOpcode : ubyte {
+		text = 1,
+		binary = 2,
+		// 3, 4, 5, 6, 7 RESERVED
+		close = 8,
+		ping = 9,
+		pong = 10,
+		// 11,12,13,14,15 RESERVED
+	}
+
+	struct WebSocketMessage {
+		bool fin;
+		bool rsv1;
+		bool rsv2;
+		bool rsv3;
+		WebSocketOpcode opcode; // 4 bits
+		bool masked;
+		ubyte lengthIndicator; // don't set this when building one to send
+		ulong realLength; // don't use when sending
+		ubyte[4] maskingKey; // don't set this when sending
+		ubyte[] data;
+
+		static WebSocketMessage simpleMessage(WebSocketOpcode opcode, void[] data) {
+			WebSocketMessage msg;
+			msg.fin = true;
+			msg.opcode = opcode;
+			msg.data = cast(ubyte[]) data;
+
+			return msg;
+		}
+
+		private void send(Cgi cgi) {
+			ubyte[64] headerScratch;
+			int headerScratchPos = 0;
+
+			realLength = data.length;
+
+			{
+				ubyte b1;
+				b1 |= cast(ubyte) opcode;
+				b1 |= rsv3 ? (1 << 4) : 0;
+				b1 |= rsv2 ? (1 << 5) : 0;
+				b1 |= rsv1 ? (1 << 6) : 0;
+				b1 |= fin  ? (1 << 7) : 0;
+
+				headerScratch[0] = b1;
+				headerScratchPos++;
+			}
+
+			{
+				headerScratchPos++; // we'll set header[1] at the end of this
+				auto rlc = realLength;
+				ubyte b2;
+				b2 |= masked ? (1 << 7) : 0;
+
+				assert(headerScratchPos == 2);
+
+				if(realLength > 65535) {
+					// use 64 bit length
+					b2 |= 0x7f;
+
+					// FIXME: double check endinaness
+					foreach(i; 0 .. 8) {
+						headerScratch[2 + 7 - i] = rlc & 0x0ff;
+						rlc >>>= 8;
+					}
+
+					headerScratchPos += 8;
+				} else if(realLength > 127) {
+					// use 16 bit length
+					b2 |= 0x7e;
+
+					// FIXME: double check endinaness
+					foreach(i; 0 .. 2) {
+						headerScratch[2 + 1 - i] = rlc & 0x0ff;
+						rlc >>>= 8;
+					}
+
+					headerScratchPos += 2;
+				} else {
+					// use 7 bit length
+					b2 |= realLength & 0b_0111_1111;
+				}
+
+				headerScratch[1] = b2;
+			}
+
+			assert(!masked, "masking key not properly implemented");
+			if(masked) {
+				// FIXME: randomize this
+				headerScratch[headerScratchPos .. headerScratchPos + 4] = maskingKey[];
+				headerScratchPos += 4;
+
+				// we'll just mask it in place...
+				int keyIdx = 0;
+				foreach(i; 0 .. data.length) {
+					data[i] = data[i] ^ maskingKey[keyIdx];
+					if(keyIdx == 3)
+						keyIdx = 0;
+					else
+						keyIdx++;
+				}
+			}
+
+			//writeln("SENDING ", headerScratch[0 .. headerScratchPos], data);
+			cgi.write(headerScratch[0 .. headerScratchPos]);
+			cgi.write(data);
+		}
+
+		static WebSocketMessage read(ubyte[] d) {
+			WebSocketMessage msg;
+			assert(d.length >= 2);
+
+			ubyte b = d[0];
+
+			msg.opcode = cast(WebSocketOpcode) (b & 0x0f);
+			b >>= 4;
+			msg.rsv3 = b & 0x01;
+			b >>= 1;
+			msg.rsv2 = b & 0x01;
+			b >>= 1;
+			msg.rsv1 = b & 0x01;
+			b >>= 1;
+			msg.fin = b & 0x01;
+
+			b = d[1];
+			msg.masked = (b & 0b1000_0000) ? true : false;
+			msg.lengthIndicator = b & 0b0111_1111;
+
+			d = d[2 .. $];
+
+			if(msg.lengthIndicator == 0x7e) {
+				// 16 bit length
+				msg.realLength = 0;
+
+				foreach(i; 0 .. 2) {
+					msg.realLength |= d[0] << ((1-i) * 8);
+					d = d[1 .. $];
+				}
+			} else if(msg.lengthIndicator == 0x7f) {
+				// 64 bit length
+				msg.realLength = 0;
+
+				foreach(i; 0 .. 8) {
+					msg.realLength |= d[0] << ((7-i) * 8);
+					d = d[1 .. $];
+				}
+			} else {
+				// 7 bit length
+				msg.realLength = msg.lengthIndicator;
+			}
+
+			if(msg.masked) {
+				msg.maskingKey = d[0 .. 4];
+				d = d[4 .. $];
+			}
+
+			msg.data = d[0 .. $];
+
+			if(msg.masked) {
+				// let's just unmask it now
+				int keyIdx = 0;
+				foreach(i; 0 .. msg.data.length) {
+					msg.data[i] = msg.data[i] ^ msg.maskingKey[keyIdx];
+					if(keyIdx == 3)
+						keyIdx = 0;
+					else
+						keyIdx++;
+				}
+			}
+
+			return msg;
+		}
+
+		char[] textData() {
+			return cast(char[]) data;
+		}
+	}
+
+}
 
 /*
-Copyright: Adam D. Ruppe, 2008 - 2012
+Copyright: Adam D. Ruppe, 2008 - 2013
 License:   <a href="http://www.boost.org/LICENSE_1_0.txt">Boost License 1.0</a>.
 Authors: Adam D. Ruppe
 
-	Copyright Adam D. Ruppe 2008 - 2012.
+	Copyright Adam D. Ruppe 2008 - 2013.
 Distributed under the Boost Software License, Version 1.0.
    (See accompanying file LICENSE_1_0.txt or copy at
 	http://www.boost.org/LICENSE_1_0.txt)
